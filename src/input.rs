@@ -13,7 +13,7 @@ pub fn getline(
     exe_cache: &[String],
 ) -> Option<String> {
     let prompt_str = prompt::build_prompt(config.c_prompt);
-    print!("{}", prompt_str);
+    print!("\r{}", prompt_str);
     io::stdout().flush().ok();
 
     let prompt_width = visible_len(&prompt_str);
