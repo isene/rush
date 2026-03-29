@@ -82,7 +82,12 @@ impl Config {
         let path = Self::config_path();
         if path.exists() {
             if let Ok(data) = fs::read_to_string(&path) {
-                if let Ok(cfg) = serde_json::from_str(&data) {
+                if let Ok(mut cfg) = serde_json::from_str::<Config>(&data) {
+                    // Merge default nicks if user has none
+                    let defaults = Self::default();
+                    for (k, v) in &defaults.nick {
+                        cfg.nick.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
                     return cfg;
                 }
             }

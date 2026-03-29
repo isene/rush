@@ -27,7 +27,10 @@ pub fn getline(
     let result = loop {
         let ev = match event::read() {
             Ok(ev) => ev,
-            Err(_) => continue,
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
         };
 
         match ev {
