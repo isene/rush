@@ -9,8 +9,10 @@ pub fn build_prompt(c_prompt: u8) -> String {
     let cwd = env::current_dir()
         .map(|p| {
             let home = dirs::home_dir().unwrap_or_default();
-            if p.starts_with(&home) {
-                format!("~{}", p.strip_prefix(&home).unwrap().display())
+            if p == home {
+                "~".to_string()
+            } else if p.starts_with(&home) {
+                format!("~/{}", p.strip_prefix(&home).unwrap().display())
             } else {
                 p.display().to_string()
             }

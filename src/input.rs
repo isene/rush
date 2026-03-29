@@ -417,10 +417,20 @@ fn visible_len(s: &str) -> usize {
 fn strip_ansi(s: &str) -> String {
     let mut result = String::new();
     let mut in_escape = false;
+    let mut in_csi = false;
     for ch in s.chars() {
         if in_escape {
-            if ch.is_ascii_alphabetic() || ch == 'm' {
+            if ch == '[' {
+                in_csi = true;
                 in_escape = false;
+                continue;
+            }
+            in_escape = false;
+            continue;
+        }
+        if in_csi {
+            if ch.is_ascii_alphabetic() {
+                in_csi = false;
             }
             continue;
         }

@@ -33,7 +33,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            nick: HashMap::new(),
+            nick: HashMap::from([
+                ("ls".to_string(), "ls --color=auto".to_string()),
+                ("ll".to_string(), "ls -la --color=auto".to_string()),
+                ("la".to_string(), "ls -a --color=auto".to_string()),
+                ("grep".to_string(), "grep --color=auto".to_string()),
+            ]),
             gnick: HashMap::new(),
             bookmarks: HashMap::new(),
             history_dedup: "smart".to_string(),
