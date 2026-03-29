@@ -28,6 +28,87 @@ pub struct Config {
     pub c_dir: u8,
     pub c_exec: u8,
     pub c_file: u8,
+    #[serde(default = "default_suggestion_color")]
+    pub c_suggestion: u8,
+}
+
+fn default_suggestion_color() -> u8 {
+    240
+}
+
+/// Predefined color themes
+pub struct Theme {
+    pub c_prompt: u8,
+    pub c_cmd: u8,
+    pub c_nick: u8,
+    pub c_gnick: u8,
+    pub c_path: u8,
+    pub c_switch: u8,
+    pub c_bookmark: u8,
+    pub c_colon: u8,
+    pub c_tabselect: u8,
+    pub c_taboption: u8,
+    pub c_dir: u8,
+    pub c_exec: u8,
+    pub c_file: u8,
+    pub c_suggestion: u8,
+}
+
+pub fn get_theme(name: &str) -> Option<Theme> {
+    match name {
+        "default" => Some(Theme {
+            c_prompt: 208, c_cmd: 48, c_nick: 87, c_gnick: 87, c_path: 7,
+            c_switch: 220, c_bookmark: 51, c_colon: 33, c_tabselect: 214,
+            c_taboption: 244, c_dir: 12, c_exec: 9, c_file: 7, c_suggestion: 240,
+        }),
+        "solarized" => Some(Theme {
+            c_prompt: 136, c_cmd: 64, c_nick: 37, c_gnick: 37, c_path: 246,
+            c_switch: 166, c_bookmark: 33, c_colon: 61, c_tabselect: 136,
+            c_taboption: 240, c_dir: 33, c_exec: 160, c_file: 246, c_suggestion: 240,
+        }),
+        "dracula" => Some(Theme {
+            c_prompt: 141, c_cmd: 84, c_nick: 117, c_gnick: 117, c_path: 253,
+            c_switch: 215, c_bookmark: 212, c_colon: 141, c_tabselect: 215,
+            c_taboption: 244, c_dir: 117, c_exec: 212, c_file: 253, c_suggestion: 242,
+        }),
+        "gruvbox" => Some(Theme {
+            c_prompt: 214, c_cmd: 142, c_nick: 108, c_gnick: 108, c_path: 223,
+            c_switch: 167, c_bookmark: 109, c_colon: 175, c_tabselect: 214,
+            c_taboption: 245, c_dir: 109, c_exec: 167, c_file: 223, c_suggestion: 241,
+        }),
+        "nord" => Some(Theme {
+            c_prompt: 110, c_cmd: 150, c_nick: 116, c_gnick: 116, c_path: 253,
+            c_switch: 173, c_bookmark: 110, c_colon: 139, c_tabselect: 110,
+            c_taboption: 244, c_dir: 110, c_exec: 173, c_file: 253, c_suggestion: 243,
+        }),
+        "monokai" => Some(Theme {
+            c_prompt: 197, c_cmd: 148, c_nick: 81, c_gnick: 81, c_path: 252,
+            c_switch: 208, c_bookmark: 141, c_colon: 197, c_tabselect: 208,
+            c_taboption: 244, c_dir: 81, c_exec: 197, c_file: 252, c_suggestion: 242,
+        }),
+        _ => None,
+    }
+}
+
+pub fn apply_theme(config: &mut Config, theme: &Theme) {
+    config.c_prompt = theme.c_prompt;
+    config.c_cmd = theme.c_cmd;
+    config.c_nick = theme.c_nick;
+    config.c_gnick = theme.c_gnick;
+    config.c_path = theme.c_path;
+    config.c_switch = theme.c_switch;
+    config.c_bookmark = theme.c_bookmark;
+    config.c_colon = theme.c_colon;
+    config.c_tabselect = theme.c_tabselect;
+    config.c_taboption = theme.c_taboption;
+    config.c_dir = theme.c_dir;
+    config.c_exec = theme.c_exec;
+    config.c_file = theme.c_file;
+    config.c_suggestion = theme.c_suggestion;
+}
+
+pub fn theme_names() -> &'static [&'static str] {
+    &["default", "solarized", "dracula", "gruvbox", "nord", "monokai"]
 }
 
 impl Default for Config {
@@ -60,6 +141,7 @@ impl Default for Config {
             c_dir: 12,
             c_exec: 9,
             c_file: 7,
+            c_suggestion: 240,
         }
     }
 }

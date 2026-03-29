@@ -1,5 +1,4 @@
 use std::env;
-use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -41,9 +40,12 @@ pub fn build_prompt(c_prompt: u8) -> String {
         format!(" \x1b[38;5;243m({})\x1b[0m", git)
     };
 
+    // Set terminal window title via OSC
+    let title = format!("\x1b]0;rush: {}\x07", cwd);
+
     format!(
-        "\x1b[38;5;244m{}@{}\x1b[0m:\x1b[38;5;{}m{}\x1b[0m{} \x1b[38;5;{}m>\x1b[0m ",
-        user, host, 81, cwd, git_str, c_prompt
+        "{}\x1b[38;5;244m{}@{}\x1b[0m:\x1b[38;5;{}m{}\x1b[0m{} \x1b[38;5;{}m>\x1b[0m ",
+        title, user, host, 81, cwd, git_str, c_prompt
     )
 }
 

@@ -3,8 +3,45 @@ use crossterm::terminal;
 use std::io::{self, Write};
 
 use crate::config::{Config, State};
-use crate::execute::{build_exe_cache, shell_split};
+use crate::execute::shell_split;
 use crate::prompt;
+
+/// Find the best history match for the current prefix
+fn find_history_suggestion<'a>(buf: &str, history: &'a [String]) -> Option<&'a str> {
+    if buf.is_empty() {
+        return None;
+    }
+    // Search from most recent backward
+    for entry in history.iter().rev() {
+        if entry.starts_with(buf) && entry != buf {
+            return Some(entry.as_str());
+        }
+    }
+    None
+}
+
+/// Smart completions for specific commands
+fn smart_completions(cmd: &str, prefix: &str) -> Vec<String> {
+    let subcommands: &[&str] = match cmd {
+        "git" => &[
+            "status", "log", "commit", "push", "pull", "checkout", "branch",
+            "merge", "diff", "stash", "rebase", "fetch", "clone", "add",
+            "reset", "tag",
+        ],
+        "cargo" => &[
+            "build", "run", "test", "check", "clean", "doc", "new", "init",
+            "publish", "update",
+        ],
+        "apt" => &[
+            "install", "remove", "update", "upgrade", "search", "show", "list",
+        ],
+        _ => return Vec::new(),
+    };
+    subcommands.iter()
+        .filter(|s| s.starts_with(prefix))
+        .map(|s| s.to_string())
+        .collect()
+}
 
 /// Read a line of input with editing, history, tab completion, syntax highlighting
 pub fn getline(
@@ -51,7 +88,7 @@ pub fn getline(
                     // Ctrl-L: clear screen
                     (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
                         print!("\x1b[2J\x1b[H{}", prompt_str);
-                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                     }
                     // Enter: execute
                     (KeyCode::Enter, _) => {
@@ -63,7 +100,7 @@ pub fn getline(
                         if let Some(completed) = complete(&buf, cursor, exe_cache, config) {
                             buf = completed;
                             cursor = buf.len();
-                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                         }
                     }
                     // Backspace
@@ -73,7 +110,7 @@ pub fn getline(
                             let prev = prev_char_boundary(&buf, cursor);
                             buf.drain(prev..cursor);
                             cursor = prev;
-                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                         }
                     }
                     // Delete
@@ -81,20 +118,13 @@ pub fn getline(
                         if cursor < buf.len() {
                             let next = next_char_boundary(&buf, cursor);
                             buf.drain(cursor..next);
-                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                         }
                     }
                     // Left
                     (KeyCode::Left, _) => {
                         if cursor > 0 {
                             cursor = prev_char_boundary(&buf, cursor);
-                            set_cursor_col(prompt_width + display_width(&buf[..cursor]));
-                        }
-                    }
-                    // Right
-                    (KeyCode::Right, _) => {
-                        if cursor < buf.len() {
-                            cursor = next_char_boundary(&buf, cursor);
                             set_cursor_col(prompt_width + display_width(&buf[..cursor]));
                         }
                     }
@@ -121,7 +151,7 @@ pub fn getline(
                             hist_pos = Some(pos);
                             buf = state.history[state.history.len() - 1 - pos].clone();
                             cursor = buf.len();
-                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                         }
                     }
                     // Down: history
@@ -131,13 +161,13 @@ pub fn getline(
                                 hist_pos = None;
                                 buf = saved_buf.clone();
                                 cursor = buf.len();
-                                redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                                redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                             }
                             Some(p) => {
                                 hist_pos = Some(p - 1);
                                 buf = state.history[state.history.len() - p].clone();
                                 cursor = buf.len();
-                                redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                                redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                             }
                             None => {}
                         }
@@ -156,7 +186,7 @@ pub fn getline(
                             }
                             buf.drain(new_pos..cursor);
                             cursor = new_pos;
-                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                         }
                     }
                     // Ctrl-A: beginning of line
@@ -172,25 +202,59 @@ pub fn getline(
                     // Ctrl-K: kill to end of line
                     (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
                         buf.truncate(cursor);
-                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                     }
                     // Ctrl-U: kill to beginning
                     (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                         buf.drain(..cursor);
                         cursor = 0;
-                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                    }
+                    // Ctrl-G: edit in $EDITOR
+                    (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
+                        terminal::disable_raw_mode().ok();
+                        let tmpdir = std::env::temp_dir();
+                        let tmpfile = tmpdir.join("rush_edit.tmp");
+                        let _ = std::fs::write(&tmpfile, &buf);
+                        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+                        let _ = std::process::Command::new(&editor)
+                            .arg(&tmpfile)
+                            .status();
+                        if let Ok(contents) = std::fs::read_to_string(&tmpfile) {
+                            buf = contents.trim_end_matches('\n').to_string();
+                            cursor = buf.len();
+                        }
+                        let _ = std::fs::remove_file(&tmpfile);
+                        terminal::enable_raw_mode().ok();
+                        // Redraw prompt and buffer
+                        print!("\r\x1b[K{}", prompt_str);
+                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                    }
+                    // Right arrow: accept suggestion or move cursor
+                    (KeyCode::Right, _) => {
+                        // If cursor is at end and there's a suggestion, accept it
+                        if cursor == buf.len() {
+                            if let Some(suggestion) = find_history_suggestion(&buf, &state.history) {
+                                buf = suggestion.to_string();
+                                cursor = buf.len();
+                                redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                            }
+                        } else if cursor < buf.len() {
+                            cursor = next_char_boundary(&buf, cursor);
+                            set_cursor_col(prompt_width + display_width(&buf[..cursor]));
+                        }
                     }
                     // Regular char
                     (KeyCode::Char(c), _) => {
                         buf.insert(cursor, c);
                         cursor += c.len_utf8();
-                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                     }
                     _ => {}
                 }
             }
             Event::Resize(_, _) => {
-                redraw_line(&prompt_str, &buf, cursor, config, exe_cache);
+                redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
             }
             _ => {}
         }
@@ -200,10 +264,23 @@ pub fn getline(
     result
 }
 
-fn redraw_line(prompt: &str, buf: &str, cursor: usize, config: &Config, exe_cache: &[String]) {
+fn redraw_line(prompt: &str, buf: &str, cursor: usize, config: &Config, exe_cache: &[String], history: &[String]) {
     let prompt_width = visible_len(prompt);
     let highlighted = syntax_highlight(buf, config, exe_cache);
-    print!("\r\x1b[K{}{}", prompt, highlighted);
+
+    // Show grayed-out history suggestion when cursor is at end
+    let suggestion_suffix = if cursor == buf.len() {
+        if let Some(suggestion) = find_history_suggestion(buf, history) {
+            let rest = &suggestion[buf.len()..];
+            format!("\x1b[38;5;{}m{}\x1b[0m", config.c_suggestion, rest)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    print!("\r\x1b[K{}{}{}", prompt, highlighted, suggestion_suffix);
     // Position cursor
     let col = prompt_width + display_width(&buf[..cursor]);
     set_cursor_col(col);
@@ -304,8 +381,47 @@ fn complete(buf: &str, cursor: usize, exe_cache: &[String], config: &Config) -> 
         matches.truncate(config.completion_limit);
         (matches.iter().map(|s| s.to_string()).collect::<Vec<_>>(), prefix.rfind(' ').map(|i| i + 1).unwrap_or(0))
     } else {
-        // Complete file/directory
+        // Smart command-specific completions
+        let cmd = parts[0];
         let word = if prefix.ends_with(' ') { "" } else { parts.last().copied().unwrap_or("") };
+
+        // If this is the second word (subcommand position), try smart completions
+        if parts.len() == 2 || (parts.len() == 1 && prefix.ends_with(' ')) {
+            let sub_prefix = if prefix.ends_with(' ') { "" } else { word };
+            let smart = smart_completions(cmd, sub_prefix);
+            if !smart.is_empty() {
+                let ws = prefix.rfind(' ').map(|i| i + 1).unwrap_or(0);
+                return if smart.len() == 1 {
+                    let mut new_buf = buf[..ws].to_string();
+                    new_buf.push_str(&smart[0]);
+                    new_buf.push(' ');
+                    if cursor < buf.len() {
+                        new_buf.push_str(&buf[cursor..]);
+                    }
+                    Some(new_buf)
+                } else {
+                    println!();
+                    for (i, m) in smart.iter().enumerate() {
+                        print!("{}  ", m);
+                        if (i + 1) % 5 == 0 { println!(); }
+                    }
+                    println!();
+                    let common = common_prefix(&smart);
+                    if common.len() > word.len() {
+                        let mut new_buf = buf[..ws].to_string();
+                        new_buf.push_str(&common);
+                        if cursor < buf.len() {
+                            new_buf.push_str(&buf[cursor..]);
+                        }
+                        Some(new_buf)
+                    } else {
+                        None
+                    }
+                };
+            }
+        }
+
+        // Complete file/directory
         let expanded = if word.starts_with('~') {
             let home = dirs::home_dir().unwrap_or_default().to_string_lossy().to_string();
             word.replacen('~', &home, 1)
@@ -421,10 +537,23 @@ fn strip_ansi(s: &str) -> String {
     let mut result = String::new();
     let mut in_escape = false;
     let mut in_csi = false;
+    let mut in_osc = false;
     for ch in s.chars() {
+        if in_osc {
+            // OSC sequences end with BEL (\x07) or ST (\x1b\\)
+            if ch == '\x07' {
+                in_osc = false;
+            }
+            continue;
+        }
         if in_escape {
             if ch == '[' {
                 in_csi = true;
+                in_escape = false;
+                continue;
+            }
+            if ch == ']' {
+                in_osc = true;
                 in_escape = false;
                 continue;
             }

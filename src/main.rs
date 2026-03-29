@@ -20,9 +20,29 @@ fn main() {
         std::process::exit(code);
     }
 
+    // First-run welcome message
+    let first_run = !Config::config_path().exists();
+
     // Load config and state
     let mut config = Config::load();
     let mut state = State::load();
+
+    if first_run {
+        println!("\x1b[1mWelcome to rush!\x1b[0m");
+        println!();
+        println!("Quick start:");
+        println!("  :help          Show all commands");
+        println!("  :nick          List/set aliases");
+        println!("  :bm            Manage bookmarks");
+        println!("  :theme <name>  Set color theme (try: dracula, nord, gruvbox)");
+        println!("  :calc <expr>   Calculator");
+        println!("  Ctrl-G         Edit line in $EDITOR");
+        println!("  Tab            Command/file completion");
+        println!("  !!             Repeat last command");
+        println!();
+        // Save default config so welcome only shows once
+        config.save();
+    }
 
     // Build or refresh executable cache (60s TTL)
     let now = now_secs();

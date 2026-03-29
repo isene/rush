@@ -1,17 +1,209 @@
-use nix::sys::signal::{self, Signal};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{self, ForkResult, Pid};
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::env;
-use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-use crate::config::{Config, State};
+use crate::config::{self, Config, State};
 
 pub struct Job {
     pub pid: i32,
     pub cmd: String,
+}
+
+/// Expand history references: !!, !-N, !N
+fn expand_history(line: &str, history: &[String]) -> String {
+    let mut result = line.to_string();
+
+    // !! -> last command
+    if result.contains("!!") {
+        if let Some(last) = history.last() {
+            result = result.replace("!!", last);
+        }
+    }
+
+    // !-N -> Nth previous command
+    let re_neg = regex::Regex::new(r"!-(\d+)").unwrap();
+    let result_clone = result.clone();
+    for cap in re_neg.captures_iter(&result_clone) {
+        let n: usize = cap[1].parse().unwrap_or(0);
+        if n > 0 && n <= history.len() {
+            let cmd = &history[history.len() - n];
+            result = result.replacen(&cap[0], cmd, 1);
+        }
+    }
+
+    // !N -> command number N (index into history)
+    let re_num = regex::Regex::new(r"!(\d+)").unwrap();
+    let result_clone = result.clone();
+    for cap in re_num.captures_iter(&result_clone) {
+        let n: usize = cap[1].parse().unwrap_or(0);
+        if n < history.len() {
+            let cmd = &history[n];
+            result = result.replacen(&cap[0], cmd, 1);
+        }
+    }
+
+    result
+}
+
+/// Levenshtein distance between two strings
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a_len = a.len();
+    let b_len = b.len();
+    if a_len == 0 { return b_len; }
+    if b_len == 0 { return a_len; }
+
+    let mut prev: Vec<usize> = (0..=b_len).collect();
+    let mut curr = vec![0; b_len + 1];
+
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.chars().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1)
+                .min(curr[j] + 1)
+                .min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_len]
+}
+
+/// Evaluate a math expression (simple recursive descent)
+fn calc_eval(expr: &str) -> Result<f64, String> {
+    let expr = expr.trim();
+    if expr.is_empty() {
+        return Err("empty expression".to_string());
+    }
+
+    // Replace constants
+    let expr = expr.replace("pi", &std::f64::consts::PI.to_string())
+                   .replace(" e ", &format!(" {} ", std::f64::consts::E))
+                   .replace("(e)", &format!("({})", std::f64::consts::E))
+                   .replace("(e,", &format!("({},", std::f64::consts::E));
+    // Handle leading 'e'
+    let expr = if expr.starts_with("e ") || expr.starts_with("e+") || expr.starts_with("e-")
+        || expr.starts_with("e*") || expr.starts_with("e/") || expr == "e" {
+        format!("{}{}", std::f64::consts::E, &expr[1..])
+    } else { expr };
+
+    calc_parse_expr(&expr, &mut 0)
+}
+
+fn calc_parse_expr(expr: &str, pos: &mut usize) -> Result<f64, String> {
+    let mut left = calc_parse_term(expr, pos)?;
+    while *pos < expr.len() {
+        let ch = expr.as_bytes().get(*pos).copied();
+        match ch {
+            Some(b'+') => { *pos += 1; left += calc_parse_term(expr, pos)?; }
+            Some(b'-') => { *pos += 1; left -= calc_parse_term(expr, pos)?; }
+            _ => break,
+        }
+    }
+    Ok(left)
+}
+
+fn calc_parse_term(expr: &str, pos: &mut usize) -> Result<f64, String> {
+    let mut left = calc_parse_power(expr, pos)?;
+    while *pos < expr.len() {
+        let ch = expr.as_bytes().get(*pos).copied();
+        match ch {
+            Some(b'*') if expr.as_bytes().get(*pos + 1) != Some(&b'*') => {
+                *pos += 1; left *= calc_parse_power(expr, pos)?;
+            }
+            Some(b'/') => { *pos += 1; let r = calc_parse_power(expr, pos)?; left /= r; }
+            Some(b'%') => { *pos += 1; let r = calc_parse_power(expr, pos)?; left %= r; }
+            _ => break,
+        }
+    }
+    Ok(left)
+}
+
+fn calc_parse_power(expr: &str, pos: &mut usize) -> Result<f64, String> {
+    let base = calc_parse_unary(expr, pos)?;
+    calc_skip_ws(expr, pos);
+    if *pos + 1 < expr.len() && expr.as_bytes()[*pos] == b'*' && expr.as_bytes()[*pos + 1] == b'*' {
+        *pos += 2;
+        let exp = calc_parse_power(expr, pos)?;
+        Ok(base.powf(exp))
+    } else {
+        Ok(base)
+    }
+}
+
+fn calc_parse_unary(expr: &str, pos: &mut usize) -> Result<f64, String> {
+    calc_skip_ws(expr, pos);
+    if *pos < expr.len() && expr.as_bytes()[*pos] == b'-' {
+        *pos += 1;
+        Ok(-calc_parse_atom(expr, pos)?)
+    } else if *pos < expr.len() && expr.as_bytes()[*pos] == b'+' {
+        *pos += 1;
+        calc_parse_atom(expr, pos)
+    } else {
+        calc_parse_atom(expr, pos)
+    }
+}
+
+fn calc_parse_atom(expr: &str, pos: &mut usize) -> Result<f64, String> {
+    calc_skip_ws(expr, pos);
+    if *pos >= expr.len() {
+        return Err("unexpected end of expression".to_string());
+    }
+
+    // Parenthesized expression
+    if expr.as_bytes()[*pos] == b'(' {
+        *pos += 1;
+        let val = calc_parse_expr(expr, pos)?;
+        calc_skip_ws(expr, pos);
+        if *pos < expr.len() && expr.as_bytes()[*pos] == b')' {
+            *pos += 1;
+        }
+        return Ok(val);
+    }
+
+    // Functions: sqrt, sin, cos, tan, log
+    for (fname, flen) in &[("sqrt", 4), ("sin", 3), ("cos", 3), ("tan", 3), ("log", 3)] {
+        if expr[*pos..].starts_with(fname) {
+            *pos += flen;
+            calc_skip_ws(expr, pos);
+            // Expect ( or just a number
+            let arg = if *pos < expr.len() && expr.as_bytes()[*pos] == b'(' {
+                *pos += 1;
+                let v = calc_parse_expr(expr, pos)?;
+                calc_skip_ws(expr, pos);
+                if *pos < expr.len() && expr.as_bytes()[*pos] == b')' { *pos += 1; }
+                v
+            } else {
+                calc_parse_atom(expr, pos)?
+            };
+            return Ok(match *fname {
+                "sqrt" => arg.sqrt(),
+                "sin" => arg.sin(),
+                "cos" => arg.cos(),
+                "tan" => arg.tan(),
+                "log" => arg.ln(),
+                _ => unreachable!(),
+            });
+        }
+    }
+
+    // Number
+    let start = *pos;
+    while *pos < expr.len() && (expr.as_bytes()[*pos].is_ascii_digit() || expr.as_bytes()[*pos] == b'.') {
+        *pos += 1;
+    }
+    if start == *pos {
+        return Err(format!("unexpected character '{}'", &expr[*pos..*pos+1]));
+    }
+    expr[start..*pos].parse::<f64>().map_err(|e| e.to_string())
+}
+
+fn calc_skip_ws(expr: &str, pos: &mut usize) {
+    while *pos < expr.len() && expr.as_bytes()[*pos] == b' ' {
+        *pos += 1;
+    }
 }
 
 /// Execute a command line, handling pipes, redirects, builtins, nicks
@@ -27,12 +219,25 @@ pub fn execute(
         return 0;
     }
 
-    // Expand nicks
-    let line = expand_nicks(line, &config.nick, &config.gnick);
+    // Clean up completed background jobs
+    cleanup_jobs(jobs);
+
+    // Expand history (!!, !-N, !N) before nick expansion
+    let line = expand_history(line, &state.history);
+
+    // Expand nicks (with parametrized support)
+    let line = expand_nicks(&line, &config.nick, &config.gnick);
 
     // Handle colon commands
     if line.starts_with(':') {
-        return handle_colon_command(&line, config, state);
+        return handle_colon_command(&line, config, state, jobs);
+    }
+
+    // xrpn integration: = expr
+    if line.starts_with('=') {
+        let expr = &line[1..].trim();
+        let cmd = format!("echo \"{},prx,off\" | xrpn", expr);
+        return run_via_shell(&cmd, &mut HashMap::new());
     }
 
     // Builtins
@@ -60,7 +265,7 @@ pub fn execute(
                 eprintln!("cd: {}: {}", dir, e);
                 return 1;
             } else {
-                let prev = env::var("OLDPWD").unwrap_or_default();
+                let _prev = env::var("OLDPWD").unwrap_or_default();
                 env::set_var("OLDPWD", env::current_dir().unwrap_or_default());
                 // Track directory history
                 let cwd = env::current_dir().unwrap_or_default().to_string_lossy().to_string();
@@ -112,6 +317,37 @@ pub fn execute(
         }
     }
 
+    // File auto-open: if the "command" is a file (not executable), open it
+    let file_path = Path::new(&expanded);
+    if file_path.is_file() && parts.len() == 1 {
+        // Check if it's executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = file_path.metadata() {
+                let mode = meta.permissions().mode();
+                if mode & 0o111 == 0 {
+                    // Not executable; check MIME type
+                    let mime = Command::new("file")
+                        .args(["--mime-type", "-b", &expanded])
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .unwrap_or_default();
+                    let mime = mime.trim();
+                    if mime.starts_with("text/") || mime.contains("json") || mime.contains("xml") {
+                        let editor = env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+                        return Command::new(&editor).arg(&expanded).status()
+                            .map(|s| s.code().unwrap_or(1)).unwrap_or(127);
+                    } else {
+                        return Command::new("xdg-open").arg(&expanded).spawn()
+                            .map(|_| 0).unwrap_or(127);
+                    }
+                }
+            }
+        }
+    }
+
     // Track frequency
     *state.cmd_frequency.entry(parts[0].clone()).or_insert(0) += 1;
 
@@ -131,7 +367,48 @@ pub fn execute(
     };
 
     // Direct execution
-    run_command(cmd_line, background, jobs)
+    let code = run_command(cmd_line, background, jobs);
+
+    // Auto-correct: suggest similar commands when not found
+    if code == 127 && config.auto_correct && !parts[0].contains('/') {
+        let suggestions = find_similar_commands(&parts[0], exe_cache, 3);
+        if !suggestions.is_empty() {
+            eprintln!("Did you mean:");
+            for (i, s) in suggestions.iter().enumerate() {
+                eprintln!("  {} {}", i + 1, s);
+            }
+        }
+    }
+
+    code
+}
+
+fn find_similar_commands(cmd: &str, exe_cache: &[String], max: usize) -> Vec<String> {
+    let mut scored: Vec<(usize, &String)> = exe_cache.iter()
+        .map(|e| (levenshtein(cmd, e), e))
+        .filter(|(d, _)| *d <= 3)
+        .collect();
+    scored.sort_by_key(|(d, _)| *d);
+    scored.truncate(max);
+    scored.into_iter().map(|(_, s)| s.clone()).collect()
+}
+
+/// Clean up completed background jobs
+fn cleanup_jobs(jobs: &mut HashMap<u32, Job>) {
+    let mut done = Vec::new();
+    for (&id, job) in jobs.iter() {
+        match waitpid(Pid::from_raw(job.pid), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => {
+                done.push(id);
+            }
+            _ => {}
+        }
+    }
+    for id in done {
+        if let Some(job) = jobs.remove(&id) {
+            eprintln!("[{}] Done: {}", id, job.cmd);
+        }
+    }
 }
 
 fn run_via_shell(line: &str, jobs: &mut HashMap<u32, Job>) -> i32 {
@@ -175,7 +452,7 @@ fn run_command(line: &str, background: bool, jobs: &mut HashMap<u32, Job>) -> i3
     } else {
         match Command::new(cmd).args(&args).status() {
             Ok(s) => s.code().unwrap_or(1),
-            Err(e) => {
+            Err(_e) => {
                 eprintln!("rush: {}: command not found", cmd);
                 127
             }
@@ -183,7 +460,7 @@ fn run_command(line: &str, background: bool, jobs: &mut HashMap<u32, Job>) -> i3
     }
 }
 
-fn handle_colon_command(line: &str, config: &mut Config, state: &mut State) -> i32 {
+fn handle_colon_command(line: &str, config: &mut Config, state: &mut State, jobs: &mut HashMap<u32, Job>) -> i32 {
     let line = &line[1..]; // strip ':'
     let parts: Vec<&str> = line.splitn(2, ' ').collect();
     let cmd = parts[0];
@@ -259,6 +536,81 @@ fn handle_colon_command(line: &str, config: &mut Config, state: &mut State) -> i
             println!("Executable cache rebuilt: {} commands", state.exe_cache.len());
             0
         }
+        "theme" => {
+            if args.is_empty() {
+                println!("Available themes: {}", config::theme_names().join(", "));
+            } else if let Some(theme) = config::get_theme(args) {
+                config::apply_theme(config, &theme);
+                config.save();
+                println!("Theme '{}' applied", args);
+            } else {
+                eprintln!("Unknown theme '{}'. Available: {}", args, config::theme_names().join(", "));
+                return 1;
+            }
+            0
+        }
+        "calc" => {
+            if args.is_empty() {
+                eprintln!("Usage: :calc <expression>");
+                return 1;
+            }
+            match calc_eval(args) {
+                Ok(val) => {
+                    // Display as integer if it's a whole number
+                    if val.fract() == 0.0 && val.abs() < 1e15 {
+                        println!("{}", val as i64);
+                    } else {
+                        println!("{}", val);
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("calc error: {}", e);
+                    1
+                }
+            }
+        }
+        "stats" => {
+            let mut entries: Vec<(&String, &usize)> = state.cmd_frequency.iter().collect();
+            entries.sort_by(|a, b| b.1.cmp(a.1));
+            entries.truncate(20);
+            println!("\x1b[1m  {:>6}  Command\x1b[0m", "Count");
+            println!("  {:->6}  {:-<30}", "", "");
+            for (cmd, count) in entries {
+                println!("  {:>6}  {}", count, cmd);
+            }
+            0
+        }
+        "jobs" => {
+            if jobs.is_empty() {
+                println!("No background jobs");
+            } else {
+                for (id, job) in jobs.iter() {
+                    println!("  [{}] PID {} : {}", id, job.pid, job.cmd);
+                }
+            }
+            0
+        }
+        "fg" => {
+            if args.is_empty() {
+                eprintln!("Usage: :fg <job_number>");
+                return 1;
+            }
+            let n: u32 = match args.parse() {
+                Ok(n) => n,
+                Err(_) => { eprintln!("Invalid job number"); return 1; }
+            };
+            if let Some(job) = jobs.remove(&n) {
+                println!("Bringing to foreground: {}", job.cmd);
+                match waitpid(Pid::from_raw(job.pid), None) {
+                    Ok(WaitStatus::Exited(_, code)) => code,
+                    _ => 1,
+                }
+            } else {
+                eprintln!("No such job: {}", n);
+                1
+            }
+        }
         "help" => {
             println!("\x1b[1mrush commands:\x1b[0m");
             println!("  :nick [name = val | -name]   Aliases");
@@ -267,7 +619,22 @@ fn handle_colon_command(line: &str, config: &mut Config, state: &mut State) -> i
             println!("  :dirs                         Directory history");
             println!("  :history [n]                  Command history");
             println!("  :rehash                       Rebuild command cache");
+            println!("  :theme [name]                 Set color theme");
+            println!("  :calc <expr>                  Calculator (+,-,*,/,%,**,sqrt,sin,cos,tan,log)");
+            println!("  = <expr>                      xrpn RPN calculator");
+            println!("  :stats                        Top 20 most-used commands");
+            println!("  :jobs                         List background jobs");
+            println!("  :fg <n>                       Bring job to foreground");
             println!("  :help                         This help");
+            println!();
+            println!("\x1b[1mHistory expansion:\x1b[0m");
+            println!("  !!                            Last command");
+            println!("  !N                            Command number N");
+            println!("  !-N                           Nth previous command");
+            println!();
+            println!("\x1b[1mKeys:\x1b[0m");
+            println!("  Ctrl-G                        Edit line in $EDITOR");
+            println!("  Right arrow                   Accept history suggestion");
             0
         }
         _ => {
@@ -288,10 +655,38 @@ pub fn expand_nicks(line: &str, nicks: &HashMap<String, String>, gnicks: &HashMa
     // Apply nicks (only at command position)
     let parts: Vec<&str> = result.splitn(2, ' ').collect();
     if let Some(expanded) = nicks.get(parts[0]) {
-        if parts.len() > 1 {
-            result = format!("{} {}", expanded, parts[1]);
+        let mut nick_val = expanded.clone();
+
+        // Parametrized nicks: replace {{key}} with key=value from arguments
+        if nick_val.contains("{{") {
+            if let Some(args_str) = parts.get(1) {
+                let args_parts = shell_split(args_str);
+                let mut params: HashMap<String, String> = HashMap::new();
+                let mut positional = Vec::new();
+                for arg in &args_parts {
+                    if let Some((k, v)) = arg.split_once('=') {
+                        params.insert(k.to_string(), v.to_string());
+                    } else {
+                        positional.push(arg.clone());
+                    }
+                }
+                // Replace {{key}} placeholders
+                for (k, v) in &params {
+                    nick_val = nick_val.replace(&format!("{{{{{}}}}}", k), v);
+                }
+                // Build remaining args (non-key=value)
+                if !positional.is_empty() {
+                    result = format!("{} {}", nick_val, positional.join(" "));
+                } else {
+                    result = nick_val;
+                }
+            } else {
+                result = nick_val;
+            }
+        } else if parts.len() > 1 {
+            result = format!("{} {}", nick_val, parts[1]);
         } else {
-            result = expanded.clone();
+            result = nick_val;
         }
     }
 
