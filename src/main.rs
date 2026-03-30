@@ -1,6 +1,7 @@
 mod config;
 mod execute;
 mod input;
+mod plugin;
 mod prompt;
 
 use config::{Config, State};
@@ -44,7 +45,8 @@ fn main() {
         let exe_cache = build_exe_cache();
         let mut jobs: HashMap<u32, Job> = HashMap::new();
         let mut recording: Option<Recording> = None;
-        let code = execute::execute(&cmd, &mut config, &mut state, &exe_cache, &mut jobs, &mut recording);
+        let mut plugins = plugin::PluginManager::new();
+        let code = execute::execute(&cmd, &mut config, &mut state, &exe_cache, &mut jobs, &mut recording, &mut plugins);
         std::process::exit(code);
     }
 
@@ -101,6 +103,10 @@ fn main() {
     let mut last_autosave = now_secs();
     let mut last_cmd_duration: f64 = 0.0;
 
+    // Load plugins
+    let mut plugins = plugin::PluginManager::new();
+    plugins.load_all();
+
     // Ignore SIGTSTP in rush itself; children handle it via process groups
     setup_signal_handlers();
 
@@ -149,14 +155,50 @@ fn main() {
             }
         }
 
+        // Pre-command plugin hook
+        let cwd = std::env::current_dir().unwrap_or_default().to_string_lossy().to_string();
+        let ctx = plugin::PluginContext {
+            hook: "pre_cmd".to_string(),
+            command: Some(trimmed.to_string()),
+            args: None,
+            cwd: cwd.clone(),
+            exit_code: None,
+            word: None,
+            line: None,
+        };
+        if let Some(resp) = plugins.run_hook("pre_cmd", &ctx) {
+            if resp.action == "block" {
+                if !resp.message.is_empty() {
+                    eprintln!("[plugin] {}", resp.message);
+                }
+                continue;
+            }
+        }
+
         // Time the command
         let start = std::time::Instant::now();
 
         // Execute
-        let exit_code = execute::execute(trimmed, &mut config, &mut state, &exe_cache, &mut jobs, &mut recording);
+        let exit_code = execute::execute(trimmed, &mut config, &mut state, &exe_cache, &mut jobs, &mut recording, &mut plugins);
 
         // Track command duration for right prompt
         last_cmd_duration = start.elapsed().as_secs_f64();
+
+        // Post-command plugin hook
+        let post_ctx = plugin::PluginContext {
+            hook: "post_cmd".to_string(),
+            command: Some(trimmed.to_string()),
+            args: None,
+            cwd: std::env::current_dir().unwrap_or_default().to_string_lossy().to_string(),
+            exit_code: Some(exit_code),
+            word: None,
+            line: None,
+        };
+        if let Some(resp) = plugins.run_hook("post_cmd", &post_ctx) {
+            if !resp.message.is_empty() {
+                println!("{}", resp.message);
+            }
+        }
 
         // Set PIPESTATUS env var
         std::env::set_var("PIPESTATUS", exit_code.to_string());

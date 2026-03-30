@@ -275,6 +275,7 @@ pub fn execute(
     exe_cache: &[String],
     jobs: &mut HashMap<u32, Job>,
     recording: &mut Option<Recording>,
+    plugins: &mut crate::plugin::PluginManager,
 ) -> i32 {
     let line = line.trim();
     if line.is_empty() {
@@ -292,7 +293,7 @@ pub fn execute(
 
     // Handle colon commands
     if line.starts_with(':') {
-        return handle_colon_command(&line, config, state, jobs, recording);
+        return handle_colon_command(&line, config, state, jobs, recording, plugins);
     }
 
     // Handle AI prompts (@ and @@)
@@ -793,6 +794,7 @@ fn handle_colon_command(
     state: &mut State,
     jobs: &mut HashMap<u32, Job>,
     recording: &mut Option<Recording>,
+    plugins: &mut crate::plugin::PluginManager,
 ) -> i32 {
     let line = &line[1..]; // strip ':'
     let parts: Vec<&str> = line.splitn(2, ' ').collect();
@@ -1213,7 +1215,7 @@ fn handle_colon_command(
                 let mut last_code = 0;
                 for c in &cmds {
                     println!("$ {}", c);
-                    last_code = execute(c, config, state, &[], jobs, recording);
+                    last_code = execute(c, config, state, &[], jobs, recording, plugins);
                 }
                 last_code
             } else {
@@ -1464,6 +1466,37 @@ fn handle_colon_command(
         }
         "import_rsh" => {
             import_rshrc(config);
+            0
+        }
+        "plugins" => {
+            if args.is_empty() {
+                plugins.list();
+            } else if args.starts_with("enable ") {
+                let name = args.strip_prefix("enable ").unwrap().trim();
+                if plugins.enable(name) {
+                    println!("Enabled plugin: {}", name);
+                } else {
+                    println!("Plugin not found: {}", name);
+                }
+            } else if args.starts_with("disable ") {
+                let name = args.strip_prefix("disable ").unwrap().trim();
+                if plugins.disable(name) {
+                    println!("Disabled plugin: {}", name);
+                } else {
+                    println!("Plugin not found: {}", name);
+                }
+            } else if args == "reload" {
+                plugins.plugins.clear();
+                plugins.load_all();
+                println!("Reloaded {} plugins", plugins.plugins.len());
+            } else {
+                // Try as a plugin command
+                if let Some(resp) = plugins.run_command(args, "") {
+                    if !resp.output.is_empty() { println!("{}", resp.output); }
+                } else {
+                    println!("Usage: :plugins [enable|disable|reload] [name]");
+                }
+            }
             0
         }
         _ => {
