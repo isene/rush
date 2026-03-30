@@ -233,7 +233,7 @@ pub fn getline(
                 match (code, modifiers) {
                     // Ctrl-C: clear line
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        println!("^C");
+                        println!();
                         break Some(String::new());
                     }
                     // Ctrl-D: exit
