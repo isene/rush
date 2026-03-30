@@ -446,6 +446,19 @@ pub fn getline(
                         buf.truncate(cursor);
                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                     }
+                    // Ctrl-Y: copy line to clipboard
+                    (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                        let _ = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(format!("echo -n {} | xclip -selection clipboard 2>/dev/null || echo -n {} | xsel --clipboard 2>/dev/null || echo -n {} | wl-copy 2>/dev/null",
+                                shell_quote(&buf), shell_quote(&buf), shell_quote(&buf)))
+                            .status();
+                        // Brief flash to confirm
+                        print!("\r\x1b[K\x1b[38;5;243mCopied to clipboard\x1b[0m");
+                        io::stdout().flush().ok();
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                    }
                     // Ctrl-U: kill to beginning
                     (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                         buf.drain(..cursor);
@@ -887,6 +900,10 @@ fn strip_ansi(s: &str) -> String {
         result.push(ch);
     }
     result
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn prev_char_boundary(s: &str, pos: usize) -> usize {

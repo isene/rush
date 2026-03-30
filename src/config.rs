@@ -22,7 +22,15 @@ pub struct Config {
     pub completion_limit: usize,
     pub show_tips: bool,
     #[serde(default)]
-    pub show_cmd: bool,  // Show timestamp + expanded command before execution
+    pub show_cmd: bool,
+    #[serde(default)]
+    pub slow_command_threshold: u64,  // seconds, 0 = disabled
+    #[serde(default)]
+    pub session_autosave: u64,  // seconds, 0 = disabled
+    #[serde(default)]
+    pub completion_show_metadata: bool,
+    #[serde(default)]
+    pub file_manager: String,  // rtfm, pointer, etc.
     #[serde(default)]
     pub validation_rules: HashMap<String, String>,
     // Colors (xterm-256)
@@ -157,6 +165,10 @@ impl Default for Config {
             completion_limit: 10,
             show_tips: true,
             show_cmd: true,
+            slow_command_threshold: 0,
+            session_autosave: 0,
+            completion_show_metadata: false,
+            file_manager: "rtfm".to_string(),
             validation_rules: HashMap::new(),
             c_prompt: 208,
             c_cmd: 48,

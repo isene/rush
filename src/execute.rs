@@ -324,9 +324,26 @@ pub fn execute(
     }
 
     match parts[0].as_str() {
+        "r" => {
+            // Launch file manager
+            let fm = &config.file_manager;
+            let _ = std::process::Command::new(fm).status();
+            return 0;
+        }
         "cd" => {
             let dir = if parts.len() > 1 {
-                expand_tilde(&parts[1])
+                let arg = &parts[1];
+                // cd N: jump to Nth directory from history
+                if let Ok(n) = arg.parse::<usize>() {
+                    if n < state.dirs.len() {
+                        state.dirs[n].clone()
+                    } else {
+                        eprintln!("cd: no directory at index {}", n);
+                        return 1;
+                    }
+                } else {
+                    expand_tilde(arg)
+                }
             } else {
                 dirs::home_dir().unwrap_or_default().to_string_lossy().to_string()
             };
@@ -471,7 +488,7 @@ fn find_similar_commands(cmd: &str, exe_cache: &[String], max: usize) -> Vec<Str
 }
 
 /// Clean up completed background jobs
-fn cleanup_jobs(jobs: &mut HashMap<u32, Job>) {
+pub fn cleanup_jobs(jobs: &mut HashMap<u32, Job>) {
     let mut done = Vec::new();
     for (&id, job) in jobs.iter() {
         match waitpid(Pid::from_raw(job.pid), Some(WaitPidFlag::WNOHANG)) {
@@ -1223,12 +1240,22 @@ fn handle_colon_command(
             println!();
             println!("\x1b[1mSpecial:\x1b[0m");
             println!("  f                                 Fuzzy find with fzf");
+            println!("  r                                 Launch file manager");
+            println!("  cd N                              Jump to Nth dir from :dirs");
             println!();
             println!("\x1b[1mKeys:\x1b[0m");
-            println!("  Tab                               Completion");
+            println!("  Tab                               Completion (interactive cycling)");
             println!("  Shift-Tab                         History search");
             println!("  Ctrl-G                            Edit line in $EDITOR");
+            println!("  Ctrl-Y                            Copy line to clipboard");
             println!("  Right arrow                       Accept history suggestion");
+            println!();
+            println!("\x1b[1mMigration:\x1b[0m");
+            println!("  :import_rsh                       Import nicks/bookmarks from ~/.rshrc");
+            0
+        }
+        "import_rsh" => {
+            import_rshrc(config);
             0
         }
         _ => {
@@ -1238,17 +1265,69 @@ fn handle_colon_command(
     }
 }
 
+fn import_rshrc(config: &mut Config) {
+    let path = dirs::home_dir().unwrap_or_default().join(".rshrc");
+    if !path.exists() {
+        println!("No ~/.rshrc found");
+        return;
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => { println!("Error reading .rshrc: {}", e); return; }
+    };
+    let mut nicks = 0;
+    let mut gnicks = 0;
+    let mut bmarks = 0;
+    // Parse :nick "name = value" patterns
+    let nick_re = regex::Regex::new(r#"@nick\["([^"]+)"\]\s*=\s*"([^"]+)""#).unwrap();
+    for cap in nick_re.captures_iter(&content) {
+        config.nick.insert(cap[1].to_string(), cap[2].to_string());
+        nicks += 1;
+    }
+    // Parse @gnick
+    let gnick_re = regex::Regex::new(r#"@gnick\["([^"]+)"\]\s*=\s*"([^"]+)""#).unwrap();
+    for cap in gnick_re.captures_iter(&content) {
+        config.gnick.insert(cap[1].to_string(), cap[2].to_string());
+        gnicks += 1;
+    }
+    // Parse @bookmarks
+    let bm_re = regex::Regex::new(r#"@bookmarks\["([^"]+)"\]\s*=\s*"([^"]+)""#).unwrap();
+    for cap in bm_re.captures_iter(&content) {
+        config.bookmarks.insert(cap[1].to_string(), crate::config::Bookmark {
+            path: cap[2].to_string(),
+            tags: vec![],
+        });
+        bmarks += 1;
+    }
+    config.save();
+    println!("Imported from .rshrc: {} nicks, {} gnicks, {} bookmarks", nicks, gnicks, bmarks);
+}
+
 pub fn expand_nicks(line: &str, nicks: &HashMap<String, String>, gnicks: &HashMap<String, String>) -> String {
     let mut result = line.to_string();
 
-    // Apply gnicks (global, anywhere in line)
-    for (k, v) in gnicks {
-        result = result.replace(k.as_str(), v.as_str());
+    // Apply gnicks (global, anywhere in line), max 3 passes to prevent loops
+    for _ in 0..3 {
+        let before = result.clone();
+        for (k, v) in gnicks {
+            result = result.replace(k.as_str(), v.as_str());
+        }
+        if result == before { break; }
     }
 
-    // Apply nicks (only at command position)
+    // Apply nicks (only at command position), guard against recursion
     let parts: Vec<&str> = result.splitn(2, ' ').collect();
     if let Some(expanded) = nicks.get(parts[0]) {
+        // Don't expand if nick expands to itself (e.g., "ls" -> "ls --color")
+        let expanded_cmd = expanded.split_whitespace().next().unwrap_or("");
+        if expanded_cmd == parts[0] {
+            // Just prepend the extra args, don't recurse
+            if parts.len() > 1 {
+                return format!("{} {}", expanded, parts[1]);
+            } else {
+                return expanded.clone();
+            }
+        }
         let mut nick_val = expanded.clone();
 
         // Parametrized nicks: replace {{key}} with key=value from arguments
