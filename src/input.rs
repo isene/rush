@@ -1,10 +1,62 @@
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
+use std::collections::HashMap;
 use std::io::{self, Write};
 
 use crate::config::{Config, State};
 use crate::execute::shell_split;
 use crate::prompt;
+
+/// Parse LS_COLORS into a map of extension -> ANSI code
+fn parse_ls_colors() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if let Ok(val) = std::env::var("LS_COLORS") {
+        for entry in val.split(':') {
+            if let Some((key, code)) = entry.split_once('=') {
+                map.insert(key.to_string(), code.to_string());
+            }
+        }
+    }
+    map
+}
+
+/// Get LS_COLORS code for a path
+fn ls_color_for(path: &str, ls_colors: &HashMap<String, String>) -> String {
+    let p = std::path::Path::new(path.trim_end_matches('/'));
+    if path.ends_with('/') || p.is_dir() {
+        if let Some(code) = ls_colors.get("di") {
+            return format!("\x1b[{}m", code);
+        }
+        return "\x1b[38;5;12m".to_string(); // default blue
+    }
+    if p.is_symlink() {
+        if let Some(code) = ls_colors.get("ln") {
+            return format!("\x1b[{}m", code);
+        }
+    }
+    // Check by extension
+    if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+        let key = format!("*.{}", ext);
+        if let Some(code) = ls_colors.get(&key) {
+            return format!("\x1b[{}m", code);
+        }
+    }
+    // Executable
+    if is_executable(path) {
+        if let Some(code) = ls_colors.get("ex") {
+            return format!("\x1b[{}m", code);
+        }
+        return "\x1b[38;5;10m".to_string(); // default green
+    }
+    String::new() // no special color
+}
+
+fn is_executable(path: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0 && m.is_file())
+        .unwrap_or(false)
+}
 
 /// Find the best history match for the current prefix
 fn find_history_suggestion<'a>(buf: &str, history: &'a [String]) -> Option<&'a str> {
@@ -166,17 +218,88 @@ pub fn getline(
                         history_search_index = 0;
                         draw_history_search(&history_search_buf, &history_search_matches, history_search_index, prompt_width);
                     }
-                    // Tab: completion
+                    // Tab: interactive completion
                     (KeyCode::Tab, _) => {
-                        if let Some(completed) = complete(&buf, cursor, exe_cache, config, &state.completion_weights) {
-                            // Track completion weight for the accepted completion
-                            let parts: Vec<&str> = completed.trim().split_whitespace().collect();
+                        let (completions, word_start) = gather_completions(&buf, cursor, exe_cache, config, &state.completion_weights);
+                        if completions.len() == 1 {
+                            let mut new_buf = buf[..word_start].to_string();
+                            new_buf.push_str(&completions[0]);
+                            if !completions[0].ends_with('/') { new_buf.push(' '); }
+                            if cursor < buf.len() { new_buf.push_str(&buf[cursor..]); }
+                            let parts: Vec<&str> = new_buf.trim().split_whitespace().collect();
                             if let Some(first) = parts.first() {
                                 *state.completion_weights.entry(first.to_string()).or_insert(0) += 1;
                             }
-                            buf = completed;
+                            buf = new_buf;
                             cursor = buf.len();
                             redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                        } else if completions.len() > 1 {
+                            // Enter interactive completion mode
+                            let ls_colors = parse_ls_colors();
+                            let mut sel: usize = 0;
+                            draw_completions(&completions, sel, &ls_colors, &prompt_str);
+                            loop {
+                                let cev = match event::read() {
+                                    Ok(ev) => ev,
+                                    Err(_) => break,
+                                };
+                                match cev {
+                                    Event::Key(KeyEvent { code: KeyCode::Tab, .. }) => {
+                                        sel = (sel + 1) % completions.len();
+                                        draw_completions(&completions, sel, &ls_colors, &prompt_str);
+                                    }
+                                    Event::Key(KeyEvent { code: KeyCode::BackTab, .. }) => {
+                                        sel = (sel + completions.len() - 1) % completions.len();
+                                        draw_completions(&completions, sel, &ls_colors, &prompt_str);
+                                    }
+                                    Event::Key(KeyEvent { code: KeyCode::Enter, .. })
+                                    | Event::Key(KeyEvent { code: KeyCode::Right, .. }) => {
+                                        // Accept selection
+                                        let mut new_buf = buf[..word_start].to_string();
+                                        new_buf.push_str(&completions[sel]);
+                                        if !completions[sel].ends_with('/') { new_buf.push(' '); }
+                                        if cursor < buf.len() { new_buf.push_str(&buf[cursor..]); }
+                                        let parts: Vec<&str> = new_buf.trim().split_whitespace().collect();
+                                        if let Some(first) = parts.first() {
+                                            *state.completion_weights.entry(first.to_string()).or_insert(0) += 1;
+                                        }
+                                        buf = new_buf;
+                                        cursor = buf.len();
+                                        // Clear completion display
+                                        clear_completions(completions.len());
+                                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                                        break;
+                                    }
+                                    Event::Key(KeyEvent { code: KeyCode::Esc, .. }) => {
+                                        // Cancel, fill common prefix
+                                        let common = common_prefix(&completions);
+                                        if common.len() > buf[word_start..cursor].len() {
+                                            let mut new_buf = buf[..word_start].to_string();
+                                            new_buf.push_str(&common);
+                                            if cursor < buf.len() { new_buf.push_str(&buf[cursor..]); }
+                                            buf = new_buf;
+                                            cursor = buf.len();
+                                        }
+                                        clear_completions(completions.len());
+                                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                                        break;
+                                    }
+                                    _ => {
+                                        // Any other key: cancel completion, keep common prefix
+                                        let common = common_prefix(&completions);
+                                        if common.len() > buf[word_start..cursor].len() {
+                                            let mut new_buf = buf[..word_start].to_string();
+                                            new_buf.push_str(&common);
+                                            if cursor < buf.len() { new_buf.push_str(&buf[cursor..]); }
+                                            buf = new_buf;
+                                            cursor = buf.len();
+                                        }
+                                        clear_completions(completions.len());
+                                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
                     // Backspace
@@ -473,11 +596,56 @@ fn syntax_highlight(line: &str, config: &Config, exe_cache: &[String]) -> String
 }
 
 /// Tab completion with learning weights
-fn complete(buf: &str, cursor: usize, exe_cache: &[String], config: &Config, weights: &std::collections::HashMap<String, usize>) -> Option<String> {
+/// Draw completions below the prompt with LS_COLORS, selected item in reverse
+fn draw_completions(completions: &[String], selected: usize, ls_colors: &HashMap<String, String>, prompt: &str) {
+    let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
+    // Move to line below prompt and clear
+    print!("\r\n\x1b[K");
+    let mut col = 0;
+    for (i, m) in completions.iter().enumerate() {
+        let color = ls_color_for(m, ls_colors);
+        let display = if i == selected {
+            format!("\x1b[7m{}{}\x1b[0m", color, m)
+        } else {
+            format!("{}{}\x1b[0m", color, m)
+        };
+        let width = m.len() + 2;
+        if col + width > cols && col > 0 {
+            print!("\r\n\x1b[K");
+            col = 0;
+        }
+        print!("{}  ", display);
+        col += width;
+    }
+    // Move cursor back up to prompt line
+    let lines_used = 1 + col / cols.max(1);
+    let total_items_width: usize = completions.iter().map(|m| m.len() + 2).sum();
+    let display_lines = (total_items_width + cols - 1) / cols.max(1);
+    let display_lines = display_lines.max(1);
+    print!("\x1b[{}A\r", display_lines);
+    io::stdout().flush().ok();
+}
+
+/// Clear the completion display area
+fn clear_completions(count: usize) {
+    let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
+    let total_width: usize = count * 15; // rough estimate
+    let lines = (total_width / cols.max(1)).max(1) + 1;
+    print!("\r\n");
+    for _ in 0..lines {
+        print!("\x1b[K\r\n");
+    }
+    // Move back up
+    print!("\x1b[{}A", lines + 1);
+    io::stdout().flush().ok();
+}
+
+/// Gather completion candidates (returns matches + word_start position)
+fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &Config, weights: &HashMap<String, usize>) -> (Vec<String>, usize) {
     let prefix = &buf[..cursor];
     let parts: Vec<&str> = prefix.split_whitespace().collect();
 
-    let (completions, word_start) = if parts.is_empty() || (parts.len() == 1 && !prefix.ends_with(' ')) {
+    if parts.is_empty() || (parts.len() == 1 && !prefix.ends_with(' ')) {
         // Complete command
         let word = parts.first().copied().unwrap_or("");
         let mut matches: Vec<String> = exe_cache
@@ -503,45 +671,19 @@ fn complete(buf: &str, cursor: usize, exe_cache: &[String], config: &Config, wei
             wb.cmp(&wa).then(a.cmp(b))
         });
         matches.truncate(config.completion_limit);
-        (matches, prefix.rfind(' ').map(|i| i + 1).unwrap_or(0))
+        return (matches, prefix.rfind(' ').map(|i| i + 1).unwrap_or(0));
     } else {
         // Smart command-specific completions
         let cmd = parts[0];
         let word = if prefix.ends_with(' ') { "" } else { parts.last().copied().unwrap_or("") };
+        let ws = prefix.rfind(' ').map(|i| i + 1).unwrap_or(0);
 
-        // If this is the second word (subcommand position), try smart completions
+        // Try smart completions for known commands
         if parts.len() == 2 || (parts.len() == 1 && prefix.ends_with(' ')) {
             let sub_prefix = if prefix.ends_with(' ') { "" } else { word };
             let smart = smart_completions(cmd, sub_prefix);
             if !smart.is_empty() {
-                let ws = prefix.rfind(' ').map(|i| i + 1).unwrap_or(0);
-                return if smart.len() == 1 {
-                    let mut new_buf = buf[..ws].to_string();
-                    new_buf.push_str(&smart[0]);
-                    new_buf.push(' ');
-                    if cursor < buf.len() {
-                        new_buf.push_str(&buf[cursor..]);
-                    }
-                    Some(new_buf)
-                } else {
-                    println!();
-                    for (i, m) in smart.iter().enumerate() {
-                        print!("{}  ", m);
-                        if (i + 1) % 5 == 0 { println!(); }
-                    }
-                    println!();
-                    let common = common_prefix(&smart);
-                    if common.len() > word.len() {
-                        let mut new_buf = buf[..ws].to_string();
-                        new_buf.push_str(&common);
-                        if cursor < buf.len() {
-                            new_buf.push_str(&buf[cursor..]);
-                        }
-                        Some(new_buf)
-                    } else {
-                        None
-                    }
-                };
+                return (smart, ws);
             }
         }
 
@@ -580,55 +722,8 @@ fn complete(buf: &str, cursor: usize, exe_cache: &[String], config: &Config, wei
         }
         matches.sort();
         matches.truncate(config.completion_limit);
-        (matches, prefix.rfind(' ').map(|i| i + 1).unwrap_or(0))
-    };
-
-    if completions.is_empty() {
-        return None;
+        (matches, ws)
     }
-
-    if completions.len() == 1 {
-        let mut new_buf = buf[..word_start].to_string();
-        new_buf.push_str(&completions[0]);
-        if !completions[0].ends_with('/') {
-            new_buf.push(' ');
-        }
-        // Preserve anything after cursor
-        if cursor < buf.len() {
-            new_buf.push_str(&buf[cursor..]);
-        }
-        return Some(new_buf);
-    }
-
-    // Multiple matches: show them (disable raw mode for proper newlines)
-    terminal::disable_raw_mode().ok();
-    println!();
-    for (i, m) in completions.iter().enumerate() {
-        if std::path::Path::new(m).is_dir() || m.ends_with('/') {
-            print!("\x1b[38;5;12m{}\x1b[0m  ", m);
-        } else {
-            print!("{}  ", m);
-        }
-        if (i + 1) % 5 == 0 {
-            println!();
-        }
-    }
-    println!();
-    io::stdout().flush().ok();
-    terminal::enable_raw_mode().ok();
-
-    // Find common prefix
-    let common = common_prefix(&completions);
-    if common.len() > buf[word_start..cursor].len() {
-        let mut new_buf = buf[..word_start].to_string();
-        new_buf.push_str(&common);
-        if cursor < buf.len() {
-            new_buf.push_str(&buf[cursor..]);
-        }
-        return Some(new_buf);
-    }
-
-    None
 }
 
 fn common_prefix(strings: &[String]) -> String {
