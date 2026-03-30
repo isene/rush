@@ -144,7 +144,7 @@ pub fn getline(
     state: &mut State,
     exe_cache: &[String],
 ) -> Option<String> {
-    let prompt_str = prompt::build_prompt(config.c_prompt);
+    let prompt_str = prompt::build_prompt(config);
     print!("\r{}", prompt_str);
     io::stdout().flush().ok();
 

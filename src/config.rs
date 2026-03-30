@@ -41,11 +41,28 @@ pub struct Config {
     pub c_file: u8,
     #[serde(default = "default_suggestion_color")]
     pub c_suggestion: u8,
+    // Prompt colors
+    #[serde(default = "default_c_user")]
+    pub c_user: u8,
+    #[serde(default = "default_c_host")]
+    pub c_host: u8,
+    #[serde(default = "default_c_cwd")]
+    pub c_cwd: u8,
+    #[serde(default = "default_c_git")]
+    pub c_git: u8,
+    #[serde(default = "default_c_stamp")]
+    pub c_stamp: u8,
+    // Directory-specific colors: [["pattern", color], ...]
+    #[serde(default)]
+    pub dir_colors: Vec<(String, u8)>,
 }
 
-fn default_suggestion_color() -> u8 {
-    240
-}
+fn default_suggestion_color() -> u8 { 240 }
+fn default_c_user() -> u8 { 2 }
+fn default_c_host() -> u8 { 2 }
+fn default_c_cwd() -> u8 { 81 }
+fn default_c_git() -> u8 { 243 }
+fn default_c_stamp() -> u8 { 240 }
 
 /// Predefined color themes
 pub struct Theme {
@@ -155,6 +172,12 @@ impl Default for Config {
             c_exec: 9,
             c_file: 7,
             c_suggestion: 240,
+            c_user: 2,
+            c_host: 2,
+            c_cwd: 81,
+            c_git: 243,
+            c_stamp: 240,
+            dir_colors: vec![],
         }
     }
 }

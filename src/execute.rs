@@ -290,7 +290,7 @@ pub fn execute(
     // Show timestamp + expanded command if enabled
     if config.show_cmd && !line.starts_with('=') {
         let now = chrono_time();
-        println!("\x1b[38;5;240m{}: {}\x1b[0m", now, line);
+        println!("\x1b[38;5;{}m{}: {}\x1b[0m", config.c_stamp, now, line);
     }
 
     // Check validation rules
