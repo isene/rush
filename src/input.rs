@@ -600,7 +600,8 @@ fn complete(buf: &str, cursor: usize, exe_cache: &[String], config: &Config, wei
         return Some(new_buf);
     }
 
-    // Multiple matches: show them
+    // Multiple matches: show them (disable raw mode for proper newlines)
+    terminal::disable_raw_mode().ok();
     println!();
     for (i, m) in completions.iter().enumerate() {
         if std::path::Path::new(m).is_dir() || m.ends_with('/') {
@@ -613,6 +614,8 @@ fn complete(buf: &str, cursor: usize, exe_cache: &[String], config: &Config, wei
         }
     }
     println!();
+    io::stdout().flush().ok();
+    terminal::enable_raw_mode().ok();
 
     // Find common prefix
     let common = common_prefix(&completions);
