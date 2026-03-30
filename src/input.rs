@@ -337,6 +337,9 @@ pub fn getline(
     };
 
     terminal::disable_raw_mode().ok();
+    // Ensure cursor is at column 0 for command output
+    print!("\x1b[G");
+    io::stdout().flush().ok();
     result
 }
 

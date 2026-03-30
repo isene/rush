@@ -92,9 +92,6 @@ fn main() {
             }
         }
 
-        // Reset cursor to column 0 before executing
-        print!("\r");
-
         // Execute
         execute::execute(trimmed, &mut config, &mut state, &exe_cache, &mut jobs, &mut recording);
     }
