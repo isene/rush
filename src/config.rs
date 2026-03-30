@@ -22,6 +22,8 @@ pub struct Config {
     pub completion_limit: usize,
     pub show_tips: bool,
     #[serde(default)]
+    pub show_cmd: bool,  // Show timestamp + expanded command before execution
+    #[serde(default)]
     pub validation_rules: HashMap<String, String>,
     // Colors (xterm-256)
     pub c_prompt: u8,
@@ -124,9 +126,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             nick: HashMap::from([
-                ("ls".to_string(), "ls --color=auto".to_string()),
-                ("ll".to_string(), "ls -la --color=auto".to_string()),
-                ("la".to_string(), "ls -a --color=auto".to_string()),
+                ("ls".to_string(), "ls --color -F".to_string()),
+                ("ll".to_string(), "ls -la --color -F".to_string()),
+                ("la".to_string(), "ls -a --color -F".to_string()),
                 ("grep".to_string(), "grep --color=auto".to_string()),
             ]),
             gnick: HashMap::new(),
@@ -137,6 +139,7 @@ impl Default for Config {
             completion_case_sensitive: false,
             completion_limit: 10,
             show_tips: true,
+            show_cmd: true,
             validation_rules: HashMap::new(),
             c_prompt: 208,
             c_cmd: 48,

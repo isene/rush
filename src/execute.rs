@@ -287,6 +287,12 @@ pub fn execute(
         return handle_ai_command(&line[1..].trim(), false);
     }
 
+    // Show timestamp + expanded command if enabled
+    if config.show_cmd && !line.starts_with('=') {
+        let now = chrono_time();
+        println!("\x1b[38;5;240m{}: {}\x1b[0m", now, line);
+    }
+
     // Check validation rules
     if !check_validation_rules(&line, &config.validation_rules) {
         return 1;
@@ -1358,4 +1364,27 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn chrono_time() -> String {
+    let secs = now_secs();
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+    let s = secs % 60;
+    // Adjust for local timezone offset
+    let offset: i64 = {
+        let now = std::time::SystemTime::now();
+        let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        // Use libc to get local time
+        unsafe {
+            let mut tm: libc::tm = std::mem::zeroed();
+            libc::localtime_r(&since_epoch, &mut tm);
+            tm.tm_gmtoff
+        }
+    };
+    let local_secs = (secs as i64 + offset) as u64;
+    let h = (local_secs % 86400) / 3600;
+    let m = (local_secs % 3600) / 60;
+    let sec = local_secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, sec)
 }
