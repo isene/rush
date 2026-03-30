@@ -58,6 +58,49 @@ fn is_executable(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+use std::sync::Mutex;
+use std::sync::OnceLock;
+
+static SWITCH_CACHE: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+
+/// Parse switches from `command --help` output, cached
+fn get_switches(cmd: &str) -> Vec<String> {
+    let cache = SWITCH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+    if let Some(switches) = cache.get(cmd) {
+        return switches.clone();
+    }
+
+    let mut switches = Vec::new();
+    // Try --help first, then -h
+    for flag in &["--help", "-h"] {
+        if let Ok(output) = std::process::Command::new(cmd)
+            .arg(flag)
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout).to_string()
+                + &String::from_utf8_lossy(&output.stderr);
+            if !text.is_empty() {
+                // Extract switches: --word or -X patterns
+                let re = regex::Regex::new(r"(?:^|\s)(--?[a-zA-Z][\w-]*)").unwrap();
+                for cap in re.captures_iter(&text) {
+                    let sw = cap[1].to_string();
+                    if !switches.contains(&sw) {
+                        switches.push(sw);
+                    }
+                }
+                if !switches.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+
+    switches.sort();
+    cache.insert(cmd.to_string(), switches.clone());
+    switches
+}
+
 /// Find the best history match for the current prefix
 fn find_history_suggestion<'a>(buf: &str, history: &'a [String]) -> Option<&'a str> {
     if buf.is_empty() {
@@ -684,6 +727,20 @@ fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &C
             let smart = smart_completions(cmd, sub_prefix);
             if !smart.is_empty() {
                 return (smart, ws);
+            }
+        }
+
+        // Complete switches from --help
+        if word.starts_with('-') {
+            let switches = get_switches(cmd);
+            let mut matches: Vec<String> = switches.iter()
+                .filter(|s| s.starts_with(word))
+                .cloned()
+                .collect();
+            if !matches.is_empty() {
+                matches.sort();
+                matches.truncate(config.completion_limit);
+                return (matches, ws);
             }
         }
 
