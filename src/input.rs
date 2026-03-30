@@ -590,8 +590,13 @@ fn syntax_highlight(line: &str, config: &Config, exe_cache: &[String]) -> String
 
     let cmd = &parts[0];
 
+    let ls_colors = parse_ls_colors();
+    const BUILTINS: &[&str] = &["cd", "exit", "quit", "export", "unset", "f"];
+
     // Determine command color
     let cmd_color = if cmd.starts_with(':') {
+        config.c_colon
+    } else if cmd.starts_with('@') {
         config.c_colon
     } else if config.nick.contains_key(cmd.as_str()) {
         config.c_nick
@@ -599,6 +604,8 @@ fn syntax_highlight(line: &str, config: &Config, exe_cache: &[String]) -> String
         config.c_gnick
     } else if config.bookmarks.contains_key(cmd.as_str()) {
         config.c_bookmark
+    } else if BUILTINS.contains(&cmd.as_str()) {
+        config.c_cmd
     } else if exe_cache.binary_search(cmd).is_ok() || std::path::Path::new(cmd).exists() {
         config.c_cmd
     } else {
@@ -609,27 +616,40 @@ fn syntax_highlight(line: &str, config: &Config, exe_cache: &[String]) -> String
     let cmd_end = line.find(' ').unwrap_or(line.len());
     let mut result = format!("\x1b[38;5;{}m{}\x1b[0m", cmd_color, &line[..cmd_end]);
 
-    // Color remaining arguments
+    // Color remaining arguments using LS_COLORS
     if cmd_end < line.len() {
         let rest = &line[cmd_end..];
         let mut colored_rest = String::new();
         for word in rest.split(' ') {
+            if word.is_empty() {
+                colored_rest.push(' ');
+                continue;
+            }
             if word.starts_with('-') {
                 colored_rest.push_str(&format!("\x1b[38;5;{}m{}\x1b[0m", config.c_switch, word));
-            } else if std::path::Path::new(word).exists() {
-                let c = if std::path::Path::new(word).is_dir() {
-                    config.c_dir
-                } else {
-                    config.c_path
-                };
-                colored_rest.push_str(&format!("\x1b[38;5;{}m{}\x1b[0m", c, word));
             } else {
-                colored_rest.push_str(word);
+                // Try LS_COLORS for paths that exist
+                let expanded = if word.starts_with('~') {
+                    let home = dirs::home_dir().unwrap_or_default().to_string_lossy().to_string();
+                    word.replacen('~', &home, 1)
+                } else {
+                    word.to_string()
+                };
+                let p = std::path::Path::new(&expanded);
+                if p.exists() || p.is_symlink() {
+                    let color_code = ls_color_for(&expanded, &ls_colors);
+                    if !color_code.is_empty() {
+                        colored_rest.push_str(&format!("{}{}\x1b[0m", color_code, word));
+                    } else {
+                        colored_rest.push_str(&format!("\x1b[38;5;{}m{}\x1b[0m", config.c_path, word));
+                    }
+                } else {
+                    colored_rest.push_str(word);
+                }
             }
             colored_rest.push(' ');
         }
-        // Remove trailing space, preserve original spacing
-        if !colored_rest.is_empty() {
+        if colored_rest.ends_with(' ') && !rest.ends_with(' ') {
             colored_rest.pop();
         }
         result.push_str(&colored_rest);
