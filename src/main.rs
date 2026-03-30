@@ -7,6 +7,14 @@ use config::{Config, State};
 use execute::{build_exe_cache, now_secs, Job, Recording};
 use std::collections::HashMap;
 
+/// Install SIGTSTP handler so Ctrl-Z does not suspend rush itself.
+/// Child processes still receive the signal via their own process group.
+fn setup_signal_handlers() {
+    unsafe {
+        libc::signal(libc::SIGTSTP, libc::SIG_IGN);
+    }
+}
+
 const TIPS: &[&str] = &[
     "Use :nick to create command aliases",
     "Tab cycles completions, Shift-Tab searches history",
@@ -91,6 +99,10 @@ fn main() {
     let mut jobs: HashMap<u32, Job> = HashMap::new();
     let mut recording: Option<Recording> = None;
     let mut last_autosave = now_secs();
+    let mut last_cmd_duration: f64 = 0.0;
+
+    // Ignore SIGTSTP in rush itself; children handle it via process groups
+    setup_signal_handlers();
 
     // Main loop
     loop {
@@ -106,7 +118,7 @@ fn main() {
         // Cleanup finished background jobs
         execute::cleanup_jobs(&mut jobs);
 
-        let line = match input::getline(&config, &mut state, &exe_cache) {
+        let line = match input::getline(&config, &mut state, &exe_cache, last_cmd_duration) {
             Some(line) => line,
             None => {
                 state.save();
@@ -128,8 +140,12 @@ fn main() {
         };
         if should_add {
             state.history.push(trimmed.to_string());
+            state.history_times.push(now_secs());
             if state.history.len() > 200 {
                 state.history.remove(0);
+                if !state.history_times.is_empty() {
+                    state.history_times.remove(0);
+                }
             }
         }
 
@@ -138,6 +154,12 @@ fn main() {
 
         // Execute
         let exit_code = execute::execute(trimmed, &mut config, &mut state, &exe_cache, &mut jobs, &mut recording);
+
+        // Track command duration for right prompt
+        last_cmd_duration = start.elapsed().as_secs_f64();
+
+        // Set PIPESTATUS env var
+        std::env::set_var("PIPESTATUS", exit_code.to_string());
 
         // Slow command alert
         let elapsed = start.elapsed().as_secs();

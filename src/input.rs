@@ -138,13 +138,54 @@ fn smart_completions(cmd: &str, prefix: &str) -> Vec<String> {
         .collect()
 }
 
+/// Check if a line is incomplete (needs continuation)
+fn line_needs_continuation(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    if trimmed.ends_with('\\') || trimmed.ends_with('|')
+        || trimmed.ends_with("&&") || trimmed.ends_with("||") {
+        return true;
+    }
+    // Check for unclosed quotes/brackets
+    let mut single_q = false;
+    let mut double_q = false;
+    let mut parens = 0i32;
+    let mut brackets = 0i32;
+    let mut braces = 0i32;
+    let mut escape = false;
+    for ch in trimmed.chars() {
+        if escape { escape = false; continue; }
+        if ch == '\\' { escape = true; continue; }
+        if ch == '\'' && !double_q { single_q = !single_q; continue; }
+        if ch == '"' && !single_q { double_q = !double_q; continue; }
+        if !single_q && !double_q {
+            match ch {
+                '(' => parens += 1,
+                ')' => parens -= 1,
+                '[' => brackets += 1,
+                ']' => brackets -= 1,
+                '{' => braces += 1,
+                '}' => braces -= 1,
+                _ => {}
+            }
+        }
+    }
+    single_q || double_q || parens > 0 || brackets > 0 || braces > 0
+}
+
 /// Read a line of input with editing, history, tab completion, syntax highlighting
 pub fn getline(
     config: &Config,
     state: &mut State,
     exe_cache: &[String],
+    last_cmd_duration: f64,
 ) -> Option<String> {
     let prompt_str = prompt::build_prompt(config);
+
+    // Draw right prompt with git status and duration
+    if config.rprompt {
+        draw_right_prompt(config, last_cmd_duration);
+    }
+
     print!("\r{}", prompt_str);
     io::stdout().flush().ok();
 
@@ -154,11 +195,20 @@ pub fn getline(
     let mut hist_pos: Option<usize> = None;
     let mut saved_buf = String::new();
 
-    // History search state
+    // History search state (Shift-Tab)
     let mut history_search_active = false;
     let mut history_search_buf = String::new();
     let mut history_search_matches: Vec<String> = Vec::new();
     let mut history_search_index: usize = 0;
+
+    // Reverse incremental search state (Ctrl-R)
+    let mut reverse_search_active = false;
+    let mut reverse_search_buf = String::new();
+    let mut reverse_search_index: usize = 0;
+
+    // Undo stack: (buffer, cursor) before each edit
+    let mut undo_stack: Vec<(String, usize)> = Vec::new();
+    let max_undo = 50;
 
     terminal::enable_raw_mode().ok();
 
@@ -228,6 +278,65 @@ pub fn getline(
             continue;
         }
 
+        // Handle reverse incremental search mode (Ctrl-R)
+        if reverse_search_active {
+            match ev {
+                Event::Key(KeyEvent { code, modifiers, .. }) => {
+                    match (code, modifiers) {
+                        (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                            reverse_search_active = false;
+                            print!("\r\x1b[K");
+                            print!("\r{}", prompt_str);
+                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                        }
+                        (KeyCode::Enter, _) => {
+                            reverse_search_active = false;
+                            // Accept the match; redraw and let it fall through to return
+                            print!("\r\x1b[K");
+                            print!("\r{}", prompt_str);
+                            cursor = buf.len();
+                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                            // Now simulate Enter: print newline and break
+                            println!();
+                            break Some(buf);
+                        }
+                        (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                            // Find next match
+                            reverse_search_index += 1;
+                            if let Some(m) = find_reverse_search(&reverse_search_buf, &state.history, reverse_search_index) {
+                                buf = m.clone();
+                                cursor = buf.len();
+                            } else {
+                                reverse_search_index = reverse_search_index.saturating_sub(1);
+                            }
+                            draw_reverse_search(&reverse_search_buf, &buf);
+                        }
+                        (KeyCode::Backspace, _) => {
+                            reverse_search_buf.pop();
+                            reverse_search_index = 0;
+                            if let Some(m) = find_reverse_search(&reverse_search_buf, &state.history, 0) {
+                                buf = m.clone();
+                                cursor = buf.len();
+                            }
+                            draw_reverse_search(&reverse_search_buf, &buf);
+                        }
+                        (KeyCode::Char(c), _) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                            reverse_search_buf.push(c);
+                            reverse_search_index = 0;
+                            if let Some(m) = find_reverse_search(&reverse_search_buf, &state.history, 0) {
+                                buf = m.clone();
+                                cursor = buf.len();
+                            }
+                            draw_reverse_search(&reverse_search_buf, &buf);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
         match ev {
             Event::Key(KeyEvent { code, modifiers, .. }) => {
                 match (code, modifiers) {
@@ -243,14 +352,29 @@ pub fn getline(
                             break None; // Signal exit
                         }
                     }
+                    // Ctrl-R: reverse incremental search
+                    (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                        reverse_search_active = true;
+                        reverse_search_buf.clear();
+                        reverse_search_index = 0;
+                        draw_reverse_search(&reverse_search_buf, &buf);
+                    }
                     // Ctrl-L: clear screen
                     (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
                         print!("\x1b[2J\x1b[H{}", prompt_str);
                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                     }
-                    // Enter: execute
+                    // Enter: execute (or continue for multi-line)
                     (KeyCode::Enter, _) => {
                         println!();
+                        if line_needs_continuation(&buf) {
+                            terminal::disable_raw_mode().ok();
+                            if let Some(full) = read_continuation(&buf) {
+                                break Some(full);
+                            } else {
+                                break Some(buf);
+                            }
+                        }
                         break Some(buf);
                     }
                     // Shift-Tab: history search
@@ -348,7 +472,8 @@ pub fn getline(
                     // Backspace
                     (KeyCode::Backspace, _) => {
                         if cursor > 0 {
-                            // Find previous char boundary
+                            undo_stack.push((buf.clone(), cursor));
+                            if undo_stack.len() > max_undo { undo_stack.remove(0); }
                             let prev = prev_char_boundary(&buf, cursor);
                             buf.drain(prev..cursor);
                             cursor = prev;
@@ -358,6 +483,8 @@ pub fn getline(
                     // Delete
                     (KeyCode::Delete, _) => {
                         if cursor < buf.len() {
+                            undo_stack.push((buf.clone(), cursor));
+                            if undo_stack.len() > max_undo { undo_stack.remove(0); }
                             let next = next_char_boundary(&buf, cursor);
                             buf.drain(cursor..next);
                             redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
@@ -417,6 +544,8 @@ pub fn getline(
                     // Ctrl-W: delete word backward
                     (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
                         if cursor > 0 {
+                            undo_stack.push((buf.clone(), cursor));
+                            if undo_stack.len() > max_undo { undo_stack.remove(0); }
                             let mut new_pos = cursor;
                             // Skip trailing spaces
                             while new_pos > 0 && buf.as_bytes()[new_pos - 1] == b' ' {
@@ -443,6 +572,8 @@ pub fn getline(
                     }
                     // Ctrl-K: kill to end of line
                     (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+                        undo_stack.push((buf.clone(), cursor));
+                        if undo_stack.len() > max_undo { undo_stack.remove(0); }
                         buf.truncate(cursor);
                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                     }
@@ -461,9 +592,19 @@ pub fn getline(
                     }
                     // Ctrl-U: kill to beginning
                     (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                        undo_stack.push((buf.clone(), cursor));
+                        if undo_stack.len() > max_undo { undo_stack.remove(0); }
                         buf.drain(..cursor);
                         cursor = 0;
                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                    }
+                    // Ctrl-_ : undo last edit
+                    (KeyCode::Char('_'), KeyModifiers::CONTROL) => {
+                        if let Some((prev_buf, prev_cursor)) = undo_stack.pop() {
+                            buf = prev_buf;
+                            cursor = prev_cursor;
+                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                        }
                     }
                     // Ctrl-G: edit in $EDITOR
                     (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
@@ -501,6 +642,63 @@ pub fn getline(
                     }
                     // Regular char
                     (KeyCode::Char(c), _) => {
+                        undo_stack.push((buf.clone(), cursor));
+                        if undo_stack.len() > max_undo { undo_stack.remove(0); }
+
+                        // Abbreviation expansion on Space (feature 11)
+                        if c == ' ' && !config.abbrev.is_empty() {
+                            // Extract the current word (from last space or start)
+                            let word_start = buf[..cursor].rfind(' ').map(|i| i + 1).unwrap_or(0);
+                            let word = &buf[word_start..cursor];
+                            if let Some(expansion) = config.abbrev.get(word).cloned() {
+                                // Briefly underline the abbreviation
+                                let before = buf[..word_start].to_string();
+                                let after = buf[cursor..].to_string();
+                                let underlined = format!("{}\x1b[4m{}\x1b[0m", before, word);
+                                print!("\r\x1b[K{}{}{}", prompt_str, underlined, after);
+                                io::stdout().flush().ok();
+                                std::thread::sleep(std::time::Duration::from_millis(150));
+                                // Replace abbreviation with expansion + space
+                                buf = format!("{}{} {}", before, expansion, after);
+                                cursor = before.len() + expansion.len() + 1;
+                                redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                                continue;
+                            }
+                        }
+
+                        // Auto-closing pairs (feature 9)
+                        if config.auto_pair {
+                            // Closing chars: skip over if already at cursor
+                            let skip_close = matches!(c, ')' | ']' | '}' | '"' | '\'')
+                                && cursor < buf.len()
+                                && buf.as_bytes().get(cursor) == Some(&(c as u8));
+                            if skip_close {
+                                cursor = next_char_boundary(&buf, cursor);
+                                redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                                continue;
+                            }
+                            // Opening chars: insert pair
+                            let close_char = match c {
+                                '(' => Some(')'),
+                                '[' => Some(']'),
+                                '{' => Some('}'),
+                                '"' => Some('"'),
+                                '\'' => Some('\''),
+                                _ => None,
+                            };
+                            if let Some(close) = close_char {
+                                let next_is_space_or_end = cursor >= buf.len()
+                                    || buf.as_bytes().get(cursor) == Some(&b' ');
+                                if next_is_space_or_end {
+                                    buf.insert(cursor, c);
+                                    buf.insert(cursor + c.len_utf8(), close);
+                                    cursor += c.len_utf8();
+                                    redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                                    continue;
+                                }
+                            }
+                        }
+
                         buf.insert(cursor, c);
                         cursor += c.len_utf8();
                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
@@ -562,6 +760,139 @@ fn draw_history_search(query: &str, matches: &[String], selected: usize, _prompt
     io::stdout().flush().ok();
 }
 
+/// Find the Nth match for reverse incremental search
+fn find_reverse_search(query: &str, history: &[String], skip: usize) -> Option<String> {
+    if query.is_empty() {
+        return history.last().cloned();
+    }
+    let mut count = 0;
+    for entry in history.iter().rev() {
+        if entry.contains(query) {
+            if count == skip {
+                return Some(entry.clone());
+            }
+            count += 1;
+        }
+    }
+    None
+}
+
+/// Draw the reverse-i-search prompt
+fn draw_reverse_search(query: &str, current_match: &str) {
+    print!("\r\x1b[K(reverse-i-search)`{}': {}", query, current_match);
+    io::stdout().flush().ok();
+}
+
+/// Draw right-aligned prompt info (git dirty/clean, duration)
+fn draw_right_prompt(config: &Config, last_cmd_duration: f64) {
+    let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Git dirty/clean indicator
+    let git_dir = find_git_dir();
+    if !git_dir.is_empty() {
+        let is_clean = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .output()
+            .map(|o| o.stdout.is_empty())
+            .unwrap_or(true);
+        if is_clean {
+            parts.push("\x1b[32m●\x1b[0m".to_string()); // green
+        } else {
+            parts.push("\x1b[31m●\x1b[0m".to_string()); // red
+        }
+    }
+
+    // Command duration if > 1s
+    if last_cmd_duration >= 1.0 {
+        if last_cmd_duration >= 60.0 {
+            let mins = (last_cmd_duration / 60.0).floor() as u64;
+            let secs = (last_cmd_duration % 60.0) as u64;
+            parts.push(format!("\x1b[38;5;243m{}m{}s\x1b[0m", mins, secs));
+        } else {
+            parts.push(format!("\x1b[38;5;243m{:.1}s\x1b[0m", last_cmd_duration));
+        }
+    }
+
+    if parts.is_empty() {
+        return;
+    }
+
+    let rprompt = parts.join(" ");
+    let visible = strip_ansi_simple(&rprompt);
+    let visible_len_rp = visible.len();
+
+    if cols > visible_len_rp + 2 {
+        // Save cursor, move to right edge, print, restore cursor
+        print!("\x1b[s\x1b[{};{}H{}\x1b[u",
+            cursor_row(), cols - visible_len_rp, rprompt);
+        io::stdout().flush().ok();
+    }
+}
+
+/// Get current cursor row (approximate, using terminal query)
+fn cursor_row() -> usize {
+    // Use crossterm to query position
+    if let Ok((_, row)) = crossterm::cursor::position() {
+        return (row + 1) as usize;
+    }
+    1
+}
+
+/// Simple ANSI strip for length calculation
+fn strip_ansi_simple(s: &str) -> String {
+    let mut result = String::new();
+    let mut in_escape = false;
+    for ch in s.chars() {
+        if in_escape {
+            if ch.is_ascii_alphabetic() { in_escape = false; }
+            continue;
+        }
+        if ch == '\x1b' { in_escape = true; continue; }
+        result.push(ch);
+    }
+    result
+}
+
+/// Find .git directory from cwd upward
+fn find_git_dir() -> String {
+    let mut dir = std::env::current_dir().unwrap_or_default();
+    for _ in 0..10 {
+        if dir.join(".git").exists() {
+            return dir.to_string_lossy().to_string();
+        }
+        if !dir.pop() { break; }
+    }
+    String::new()
+}
+
+/// Read continuation lines for multi-line input
+fn read_continuation(first_line: &str) -> Option<String> {
+    let mut full = first_line.to_string();
+    loop {
+        print!(" > ");
+        io::stdout().flush().ok();
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line).is_err() {
+            return Some(full);
+        }
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        // If previous line ended with \, remove the backslash
+        if full.trim_end().ends_with('\\') {
+            let len = full.trim_end().len();
+            full.truncate(len - 1);
+            full.push(' ');
+        } else {
+            full.push(' ');
+        }
+        full.push_str(trimmed);
+        if !line_needs_continuation(&full) {
+            return Some(full);
+        }
+    }
+}
+
 fn redraw_line(prompt: &str, buf: &str, cursor: usize, config: &Config, exe_cache: &[String], history: &[String]) {
     let prompt_width = visible_len(prompt);
     let highlighted = syntax_highlight(buf, config, exe_cache);
@@ -590,23 +921,84 @@ fn set_cursor_col(col: usize) {
     io::stdout().flush().ok();
 }
 
-/// Syntax highlight the command line
+/// Syntax highlight the command line (with pipe/operator awareness)
 fn syntax_highlight(line: &str, config: &Config, exe_cache: &[String]) -> String {
     if line.is_empty() {
         return String::new();
     }
 
-    let parts = shell_split(line);
+    // Split on pipe/logical operators, preserving operators
+    let segments = split_on_operators(line);
+    let mut result = String::new();
+
+    for (segment, operator) in &segments {
+        result.push_str(&highlight_segment(segment, config, exe_cache));
+        if !operator.is_empty() {
+            result.push_str(operator);
+        }
+    }
+
+    result
+}
+
+/// Split line on |, &&, || preserving operators
+fn split_on_operators(line: &str) -> Vec<(String, String)> {
+    let mut segments: Vec<(String, String)> = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+
+    while let Some(ch) = chars.next() {
+        if escape { current.push(ch); escape = false; continue; }
+        if ch == '\\' { current.push(ch); escape = true; continue; }
+        if ch == '\'' && !in_double { in_single = !in_single; current.push(ch); continue; }
+        if ch == '"' && !in_single { in_double = !in_double; current.push(ch); continue; }
+        if in_single || in_double { current.push(ch); continue; }
+
+        if ch == '|' {
+            if chars.peek() == Some(&'|') {
+                chars.next();
+                segments.push((current.clone(), "||".to_string()));
+                current.clear();
+                continue;
+            }
+            segments.push((current.clone(), "|".to_string()));
+            current.clear();
+            continue;
+        }
+        if ch == '&' {
+            if chars.peek() == Some(&'&') {
+                chars.next();
+                segments.push((current.clone(), "&&".to_string()));
+                current.clear();
+                continue;
+            }
+        }
+        current.push(ch);
+    }
+    segments.push((current, String::new()));
+    segments
+}
+
+/// Highlight a single command segment
+fn highlight_segment(segment: &str, config: &Config, exe_cache: &[String]) -> String {
+    let trimmed = segment.trim_start();
+    if trimmed.is_empty() {
+        return segment.to_string();
+    }
+
+    let leading_ws = &segment[..segment.len() - trimmed.len()];
+    let parts = shell_split(trimmed);
     if parts.is_empty() {
-        return line.to_string();
+        return segment.to_string();
     }
 
     let cmd = &parts[0];
-
     let ls_colors = parse_ls_colors();
-    const BUILTINS: &[&str] = &["cd", "exit", "quit", "export", "unset", "f"];
+    const BUILTINS: &[&str] = &["cd", "exit", "quit", "export", "unset", "f", "pushd", "popd"];
 
-    // Determine command color
     let cmd_color = if cmd.starts_with(':') {
         config.c_colon
     } else if cmd.starts_with('@') {
@@ -622,16 +1014,14 @@ fn syntax_highlight(line: &str, config: &Config, exe_cache: &[String]) -> String
     } else if exe_cache.binary_search(cmd).is_ok() || std::path::Path::new(cmd).exists() {
         config.c_cmd
     } else {
-        196 // Red for unknown
+        196
     };
 
-    // Color the command part
-    let cmd_end = line.find(' ').unwrap_or(line.len());
-    let mut result = format!("\x1b[38;5;{}m{}\x1b[0m", cmd_color, &line[..cmd_end]);
+    let cmd_end = trimmed.find(' ').unwrap_or(trimmed.len());
+    let mut result = format!("{}\x1b[38;5;{}m{}\x1b[0m", leading_ws, cmd_color, &trimmed[..cmd_end]);
 
-    // Color remaining arguments using LS_COLORS
-    if cmd_end < line.len() {
-        let rest = &line[cmd_end..];
+    if cmd_end < trimmed.len() {
+        let rest = &trimmed[cmd_end..];
         let mut colored_rest = String::new();
         for word in rest.split(' ') {
             if word.is_empty() {
@@ -641,7 +1031,6 @@ fn syntax_highlight(line: &str, config: &Config, exe_cache: &[String]) -> String
             if word.starts_with('-') {
                 colored_rest.push_str(&format!("\x1b[38;5;{}m{}\x1b[0m", config.c_switch, word));
             } else {
-                // Try LS_COLORS for paths that exist
                 let expanded = if word.starts_with('~') {
                     let home = dirs::home_dir().unwrap_or_default().to_string_lossy().to_string();
                     word.replacen('~', &home, 1)
@@ -721,6 +1110,20 @@ fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &C
     let prefix = &buf[..cursor];
     let parts: Vec<&str> = prefix.split_whitespace().collect();
 
+    // Environment variable completion: $PREFIX<TAB>
+    let current_word = if prefix.ends_with(' ') { "" } else { parts.last().copied().unwrap_or("") };
+    if current_word.starts_with('$') {
+        let var_prefix = &current_word[1..]; // strip $
+        let ws = prefix.rfind(' ').map(|i| i + 1).unwrap_or(0);
+        let mut matches: Vec<String> = std::env::vars()
+            .filter(|(k, _)| k.starts_with(var_prefix))
+            .map(|(k, _)| format!("${}", k))
+            .collect();
+        matches.sort();
+        matches.truncate(config.completion_limit);
+        return (matches, ws);
+    }
+
     if parts.is_empty() || (parts.len() == 1 && !prefix.ends_with(' ')) {
         // Complete command
         let word = parts.first().copied().unwrap_or("");
@@ -747,7 +1150,7 @@ fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &C
                 ":rehash", ":theme", ":calc", ":stats", ":jobs", ":fg",
                 ":env", ":config", ":validate", ":save_session", ":load_session",
                 ":list_sessions", ":delete_session", ":record", ":replay",
-                ":version", ":info", ":help",
+                ":abbrev", ":version", ":info", ":help",
             ];
             for cmd in &colon_cmds {
                 if cmd.starts_with(word) && !matches.iter().any(|m| m == cmd) {

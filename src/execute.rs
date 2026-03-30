@@ -8,9 +8,25 @@ use std::process::Command;
 
 use crate::config::{self, Bookmark, Config, State};
 
+/// Status for a job (running or stopped)
+pub enum JobStatus {
+    Running,
+    Stopped,
+}
+
+impl std::fmt::Display for JobStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JobStatus::Running => write!(f, "Running"),
+            JobStatus::Stopped => write!(f, "Stopped"),
+        }
+    }
+}
+
 pub struct Job {
     pub pid: i32,
     pub cmd: String,
+    pub status: JobStatus,
 }
 
 /// Active recording state (name, list of commands)
@@ -369,6 +385,42 @@ pub fn execute(
             }
             return 0;
         }
+        "pushd" => {
+            let current = env::current_dir().unwrap_or_default().to_string_lossy().to_string();
+            let dir = if parts.len() > 1 {
+                expand_tilde(&parts[1])
+            } else {
+                // With no args, swap top of stack with cwd
+                if let Some(top) = state.dir_stack.last().cloned() {
+                    top
+                } else {
+                    eprintln!("pushd: no other directory");
+                    return 1;
+                }
+            };
+            if let Err(e) = env::set_current_dir(&dir) {
+                eprintln!("pushd: {}: {}", dir, e);
+                return 1;
+            }
+            state.dir_stack.push(current);
+            let cwd = env::current_dir().unwrap_or_default().to_string_lossy().to_string();
+            println!("{}", cwd);
+            return 0;
+        }
+        "popd" => {
+            if let Some(dir) = state.dir_stack.pop() {
+                if let Err(e) = env::set_current_dir(&dir) {
+                    eprintln!("popd: {}: {}", dir, e);
+                    state.dir_stack.push(dir);
+                    return 1;
+                }
+                println!("{}", dir);
+            } else {
+                eprintln!("popd: directory stack empty");
+                return 1;
+            }
+            return 0;
+        }
         "exit" | "quit" => {
             state.save();
             config.save();
@@ -463,13 +515,44 @@ pub fn execute(
     // Direct execution
     let code = run_command(cmd_line, background, jobs);
 
-    // Auto-correct: suggest similar commands when not found
-    if code == 127 && config.auto_correct && !parts[0].contains('/') {
-        let suggestions = find_similar_commands(&parts[0], exe_cache, 3);
-        if !suggestions.is_empty() {
-            eprintln!("Did you mean:");
-            for (i, s) in suggestions.iter().enumerate() {
-                eprintln!("  {} {}", i + 1, s);
+    // Command not found: try package suggestion, then Levenshtein
+    if code == 127 && !parts[0].contains('/') {
+        let mut pkg_suggested = false;
+        // Try command-not-found or pkgfile for package suggestions
+        let helpers: Vec<&str> = vec![
+            "/usr/lib/command-not-found",
+            "command-not-found",
+            "pkgfile",
+        ];
+        for helper in &helpers {
+            let exists = if helper.starts_with('/') {
+                Path::new(helper).exists()
+            } else {
+                Command::new("which").arg(helper).output()
+                    .map(|o| o.status.success()).unwrap_or(false)
+            };
+            if exists {
+                if let Ok(output) = Command::new(helper).arg(&parts[0]).output() {
+                    let out = String::from_utf8_lossy(&output.stdout);
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    let combined = format!("{}{}", out, err);
+                    let trimmed = combined.trim();
+                    if !trimmed.is_empty() {
+                        eprintln!("{}", trimmed);
+                        pkg_suggested = true;
+                    }
+                }
+                break;
+            }
+        }
+        // Fall back to Levenshtein suggestions
+        if !pkg_suggested && config.auto_correct {
+            let suggestions = find_similar_commands(&parts[0], exe_cache, 3);
+            if !suggestions.is_empty() {
+                eprintln!("Did you mean:");
+                for (i, s) in suggestions.iter().enumerate() {
+                    eprintln!("  {} {}", i + 1, s);
+                }
             }
         }
     }
@@ -506,10 +589,28 @@ pub fn cleanup_jobs(jobs: &mut HashMap<u32, Job>) {
 }
 
 fn run_via_shell(line: &str, _jobs: &mut HashMap<u32, Job>) -> i32 {
+    // Run the command with inherited stdio (real-time output),
+    // then query PIPESTATUS from a separate bash invocation trick.
+    // We use bash -c with PIPESTATUS capture via a temp file.
+    let tmpfile = format!("/tmp/rush_pipestatus_{}", std::process::id());
+    let wrapped = format!(
+        "{}; echo ${{PIPESTATUS[*]}} > {}",
+        line, tmpfile
+    );
+
     let status = Command::new("bash")
         .arg("-c")
-        .arg(line)
+        .arg(&wrapped)
         .status();
+
+    // Read PIPESTATUS from temp file
+    if let Ok(ps) = std::fs::read_to_string(&tmpfile) {
+        let ps = ps.trim().to_string();
+        if !ps.is_empty() {
+            env::set_var("PIPESTATUS", &ps);
+        }
+        let _ = std::fs::remove_file(&tmpfile);
+    }
 
     match status {
         Ok(s) => s.code().unwrap_or(1),
@@ -532,10 +633,10 @@ fn run_command(line: &str, background: bool, jobs: &mut HashMap<u32, Job>) -> i3
     if background {
         match Command::new(cmd).args(&args).spawn() {
             Ok(child) => {
-                let id = jobs.len() as u32 + 1;
+                let id = (jobs.keys().max().copied().unwrap_or(0)) + 1;
                 let pid = child.id() as i32;
                 println!("[{}] {}", id, pid);
-                jobs.insert(id, Job { pid, cmd: line.to_string() });
+                jobs.insert(id, Job { pid, cmd: line.to_string(), status: JobStatus::Running });
                 0
             }
             Err(e) => {
@@ -544,8 +645,41 @@ fn run_command(line: &str, background: bool, jobs: &mut HashMap<u32, Job>) -> i3
             }
         }
     } else {
-        match Command::new(cmd).args(&args).status() {
-            Ok(s) => s.code().unwrap_or(1),
+        use std::os::unix::process::CommandExt;
+        // Spawn child in its own process group so Ctrl-Z suspends it, not rush
+        let mut child_cmd = Command::new(cmd);
+        child_cmd.args(&args);
+        unsafe {
+            child_cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+        match child_cmd.spawn() {
+            Ok(child) => {
+                let pid = child.id() as i32;
+                // Give the child's process group the terminal
+                unsafe { libc::tcsetpgrp(0, pid); }
+                // Wait, handling stopped status
+                let result = loop {
+                    match waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WUNTRACED)) {
+                        Ok(WaitStatus::Exited(_, code)) => break code,
+                        Ok(WaitStatus::Signaled(_, sig, _)) => break 128 + sig as i32,
+                        Ok(WaitStatus::Stopped(_, _)) => {
+                            // Child was suspended via Ctrl-Z
+                            let id = (jobs.keys().max().copied().unwrap_or(0)) + 1;
+                            eprintln!("\n[{}] Stopped  {}", id, line);
+                            jobs.insert(id, Job { pid, cmd: line.to_string(), status: JobStatus::Stopped });
+                            break 0;
+                        }
+                        Err(_) => break 1,
+                        _ => break 1,
+                    }
+                };
+                // Reclaim terminal for rush
+                unsafe { libc::tcsetpgrp(0, libc::getpgrp()); }
+                result
+            }
             Err(_e) => {
                 eprintln!("rush: {}: command not found", cmd);
                 127
@@ -760,8 +894,42 @@ fn handle_colon_command(
             0
         }
         "dirs" => {
-            for (i, d) in state.dirs.iter().enumerate() {
-                println!("  {} {}", i, d);
+            if args == "-v" {
+                // Show directory stack (pushd/popd)
+                let cwd = env::current_dir().unwrap_or_default().to_string_lossy().to_string();
+                println!("  0 {}", cwd);
+                for (i, d) in state.dir_stack.iter().rev().enumerate() {
+                    println!("  {} {}", i + 1, d);
+                }
+            } else {
+                // Show cd history
+                for (i, d) in state.dirs.iter().enumerate() {
+                    println!("  {} {}", i, d);
+                }
+            }
+            0
+        }
+        "abbrev" => {
+            if args.is_empty() {
+                if config.abbrev.is_empty() {
+                    println!("No abbreviations");
+                } else {
+                    for (k, v) in &config.abbrev {
+                        println!("  {} = {}", k, v);
+                    }
+                }
+            } else if args.starts_with('-') {
+                let name = &args[1..];
+                config.abbrev.remove(name);
+                config.save();
+                println!("Abbreviation '{}' removed", name);
+            } else if let Some((name, val)) = args.split_once('=') {
+                config.abbrev.insert(name.trim().to_string(), val.trim().to_string());
+                config.save();
+                println!("Abbreviation '{}' set", name.trim());
+            } else {
+                eprintln!("Usage: :abbrev [name = expansion | -name]");
+                return 1;
             }
             0
         }
@@ -769,7 +937,26 @@ fn handle_colon_command(
             let count = args.parse::<usize>().unwrap_or(50);
             let start = state.history.len().saturating_sub(count);
             for (i, cmd) in state.history[start..].iter().enumerate() {
-                println!("  {:4} {}", start + i, cmd);
+                let idx = start + i;
+                if idx < state.history_times.len() && state.history_times[idx] > 0 {
+                    let ts = state.history_times[idx];
+                    let offset: i64 = unsafe {
+                        let mut tm: libc::tm = std::mem::zeroed();
+                        let secs = ts as i64;
+                        libc::localtime_r(&secs, &mut tm);
+                        tm.tm_gmtoff
+                    };
+                    let local = (ts as i64 + offset) as u64;
+                    let h = (local % 86400) / 3600;
+                    let m = (local % 3600) / 60;
+                    let s = local % 60;
+                    // Also compute date
+                    let days = local / 86400;
+                    // Approximate date from epoch days (good enough for display)
+                    println!("  {:4} [{:02}:{:02}:{:02}] {}", idx, h, m, s, cmd);
+                } else {
+                    println!("  {:4} {}", idx, cmd);
+                }
             }
             0
         }
@@ -828,7 +1015,7 @@ fn handle_colon_command(
                 println!("No background jobs");
             } else {
                 for (id, job) in jobs.iter() {
-                    println!("  [{}] PID {} : {}", id, job.pid, job.cmd);
+                    println!("  [{}] {} PID {} : {}", id, job.status, job.pid, job.cmd);
                 }
             }
             0
@@ -844,8 +1031,17 @@ fn handle_colon_command(
             };
             if let Some(job) = jobs.remove(&n) {
                 println!("Bringing to foreground: {}", job.cmd);
+                // Send SIGCONT in case the job was stopped
+                unsafe { libc::kill(job.pid, libc::SIGCONT); }
                 match waitpid(Pid::from_raw(job.pid), None) {
                     Ok(WaitStatus::Exited(_, code)) => code,
+                    Ok(WaitStatus::Stopped(_, _)) => {
+                        // Re-stopped via Ctrl-Z; put back as stopped
+                        let id = n;
+                        eprintln!("\n[{}] Stopped  {}", id, job.cmd);
+                        jobs.insert(id, Job { pid: job.pid, cmd: job.cmd, status: JobStatus::Stopped });
+                        0
+                    }
                     _ => 1,
                 }
             } else {
@@ -1092,6 +1288,8 @@ fn handle_colon_command(
                 println!("  completion_case_sensitive = {}", config.completion_case_sensitive);
                 println!("  completion_limit = {}", config.completion_limit);
                 println!("  show_tips = {}", config.show_tips);
+                println!("  rprompt = {}", config.rprompt);
+                println!("  auto_pair = {}", config.auto_pair);
                 println!("  c_prompt = {}", config.c_prompt);
                 println!("  c_cmd = {}", config.c_cmd);
                 println!("  c_nick = {}", config.c_nick);
@@ -1135,6 +1333,8 @@ fn handle_colon_command(
                         }
                     }
                     "show_tips" => { config.show_tips = val == "true"; }
+                    "rprompt" => { config.rprompt = val == "true"; }
+                    "auto_pair" => { config.auto_pair = val == "true"; }
                     "c_prompt" | "c_cmd" | "c_nick" | "c_gnick" | "c_path" |
                     "c_switch" | "c_bookmark" | "c_colon" | "c_tabselect" |
                     "c_taboption" | "c_dir" | "c_exec" | "c_file" | "c_suggestion" => {
@@ -1225,6 +1425,7 @@ fn handle_colon_command(
             println!("  :delete_session <name>            Delete a session");
             println!("  :record start|stop|show [name]    Record commands");
             println!("  :replay <name>                    Replay recorded commands");
+            println!("  :abbrev [name = val | -name]      Fish-style abbreviations");
             println!("  :version                          Show version");
             println!("  :info                             Show feature overview");
             println!("  :help                             This help");
@@ -1242,13 +1443,20 @@ fn handle_colon_command(
             println!("  f                                 Fuzzy find with fzf");
             println!("  r                                 Launch file manager");
             println!("  cd N                              Jump to Nth dir from :dirs");
+            println!("  pushd [dir]                       Push dir to stack and cd");
+            println!("  popd                              Pop dir from stack and cd");
+            println!("  :dirs -v                          Show directory stack");
             println!();
             println!("\x1b[1mKeys:\x1b[0m");
             println!("  Tab                               Completion (interactive cycling)");
             println!("  Shift-Tab                         History search");
+            println!("  Ctrl-R                            Reverse incremental search");
             println!("  Ctrl-G                            Edit line in $EDITOR");
             println!("  Ctrl-Y                            Copy line to clipboard");
+            println!("  Ctrl-Z                            Suspend foreground process");
+            println!("  Ctrl-_ / Ctrl-Z (in edit)        Undo last edit");
             println!("  Right arrow                       Accept history suggestion");
+            println!("  Space                             Expand abbreviations");
             println!();
             println!("\x1b[1mMigration:\x1b[0m");
             println!("  :import_rsh                       Import nicks/bookmarks from ~/.rshrc");

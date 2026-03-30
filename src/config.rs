@@ -33,6 +33,12 @@ pub struct Config {
     pub file_manager: String,  // rtfm, pointer, etc.
     #[serde(default)]
     pub validation_rules: HashMap<String, String>,
+    #[serde(default = "default_rprompt")]
+    pub rprompt: bool,
+    #[serde(default = "default_auto_pair")]
+    pub auto_pair: bool,
+    #[serde(default)]
+    pub abbrev: HashMap<String, String>,
     // Colors (xterm-256)
     pub c_prompt: u8,
     pub c_cmd: u8,
@@ -71,6 +77,8 @@ fn default_c_host() -> u8 { 2 }
 fn default_c_cwd() -> u8 { 81 }
 fn default_c_git() -> u8 { 243 }
 fn default_c_stamp() -> u8 { 240 }
+fn default_rprompt() -> bool { true }
+fn default_auto_pair() -> bool { true }
 
 /// Predefined color themes
 pub struct Theme {
@@ -170,6 +178,9 @@ impl Default for Config {
             completion_show_metadata: false,
             file_manager: "rtfm".to_string(),
             validation_rules: HashMap::new(),
+            rprompt: true,
+            auto_pair: true,
+            abbrev: HashMap::new(),
             c_prompt: 208,
             c_cmd: 48,
             c_nick: 87,
@@ -197,6 +208,8 @@ impl Default for Config {
 #[derive(Serialize, Deserialize, Default)]
 pub struct State {
     pub history: Vec<String>,
+    #[serde(default)]
+    pub history_times: Vec<u64>,
     pub cmd_frequency: HashMap<String, usize>,
     pub exe_cache: Vec<String>,
     pub exe_cache_time: u64,
@@ -205,6 +218,8 @@ pub struct State {
     pub recordings: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub completion_weights: HashMap<String, usize>,
+    #[serde(default)]
+    pub dir_stack: Vec<String>,
 }
 
 impl Config {
