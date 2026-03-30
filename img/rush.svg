@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#0a0a14"/>
+    </linearGradient>
+    <linearGradient id="rust" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f74c00"/>
+      <stop offset="100%" style="stop-color:#b7410e"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    @keyframes cursor-blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+    @keyframes type { 0% { width: 0; } 100% { width: 72px; } }
+    @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 0.8; } }
+    .cursor { animation: cursor-blink 1s step-end infinite; }
+    .gear { animation: pulse 3s ease-in-out infinite; }
+  </style>
+
+  <!-- Background -->
+  <circle cx="128" cy="128" r="120" fill="url(#bg)" stroke="url(#rust)" stroke-width="3"/>
+
+  <!-- Rust gear teeth (subtle) -->
+  <g class="gear" opacity="0.3">
+    <circle cx="128" cy="128" r="95" fill="none" stroke="#f74c00" stroke-width="1" stroke-dasharray="12 8"/>
+    <circle cx="128" cy="128" r="85" fill="none" stroke="#f74c00" stroke-width="0.5" stroke-dasharray="6 14"/>
+  </g>
+
+  <!-- Terminal window -->
+  <rect x="42" y="52" width="172" height="120" rx="8" fill="#0d0d0d" stroke="#f74c00" stroke-width="1.5"/>
+  <!-- Title bar -->
+  <rect x="42" y="52" width="172" height="18" rx="8" fill="#1a1a2e"/>
+  <rect x="42" y="64" width="172" height="6" fill="#1a1a2e"/>
+  <!-- Window buttons -->
+  <circle cx="56" cy="61" r="3.5" fill="#e55"/>
+  <circle cx="68" cy="61" r="3.5" fill="#e2b714"/>
+  <circle cx="80" cy="61" r="3.5" fill="#4c4"/>
+
+  <!-- Prompt line 1 -->
+  <text x="52" y="88" font-family="monospace" font-size="9" font-weight="bold" fill="#4c4">geir</text>
+  <text x="80" y="88" font-family="monospace" font-size="9" fill="#888">@juba:</text>
+  <text x="116" y="88" font-family="monospace" font-size="9" fill="#51afef">~/</text>
+  <text x="128" y="88" font-family="monospace" font-size="9" fill="#f74c00">></text>
+  <text x="136" y="88" font-family="monospace" font-size="9" fill="#4c4">ls</text>
+
+  <!-- Output line -->
+  <text x="52" y="102" font-family="monospace" font-size="8" fill="#51afef">src/</text>
+  <text x="78" y="102" font-family="monospace" font-size="8" fill="#4c4">Cargo.toml</text>
+  <text x="140" y="102" font-family="monospace" font-size="8" fill="#aab">README.md</text>
+
+  <!-- Prompt line 2 -->
+  <text x="52" y="120" font-family="monospace" font-size="9" font-weight="bold" fill="#4c4">geir</text>
+  <text x="80" y="120" font-family="monospace" font-size="9" fill="#888">@juba:</text>
+  <text x="116" y="120" font-family="monospace" font-size="9" fill="#51afef">~/</text>
+  <text x="128" y="120" font-family="monospace" font-size="9" fill="#f74c00">></text>
+
+  <!-- Blinking cursor -->
+  <rect class="cursor" x="136" y="112" width="6" height="10" rx="1" fill="#f74c00"/>
+
+  <!-- Timestamp line (subtle) -->
+  <text x="52" y="140" font-family="monospace" font-size="7" fill="#555">12:13:27: ls --color -F</text>
+
+  <!-- Speed indicator: lightning bolt -->
+  <g transform="translate(180, 130)">
+    <polygon points="8,0 2,12 6,12 0,24 14,10 9,10 14,0" fill="#f74c00" opacity="0.8"/>
+  </g>
+  <text x="178" y="156" font-family="monospace" font-size="6" fill="#f74c00" opacity="0.6">26ms</text>
+
+  <!-- rush text -->
+  <text x="128" y="206" font-family="monospace" font-size="24" font-weight="bold" fill="url(#rust)" text-anchor="middle" letter-spacing="3">rush</text>
+  <text x="128" y="224" font-family="monospace" font-size="8" fill="#888" text-anchor="middle">fast shell in Rust</text>
+</svg>
