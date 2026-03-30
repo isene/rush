@@ -3,17 +3,26 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Bookmark {
+    pub path: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     pub nick: HashMap<String, String>,
     pub gnick: HashMap<String, String>,
-    pub bookmarks: HashMap<String, String>,
+    pub bookmarks: HashMap<String, Bookmark>,
     pub history_dedup: String,       // off, full, smart
     pub auto_correct: bool,
     pub completion_fuzzy: bool,
     pub completion_case_sensitive: bool,
     pub completion_limit: usize,
     pub show_tips: bool,
+    #[serde(default)]
+    pub validation_rules: HashMap<String, String>,
     // Colors (xterm-256)
     pub c_prompt: u8,
     pub c_cmd: u8,
@@ -128,6 +137,7 @@ impl Default for Config {
             completion_case_sensitive: false,
             completion_limit: 10,
             show_tips: true,
+            validation_rules: HashMap::new(),
             c_prompt: 208,
             c_cmd: 48,
             c_nick: 87,
@@ -153,6 +163,10 @@ pub struct State {
     pub exe_cache: Vec<String>,
     pub exe_cache_time: u64,
     pub dirs: Vec<String>,
+    #[serde(default)]
+    pub recordings: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub completion_weights: HashMap<String, usize>,
 }
 
 impl Config {
@@ -164,13 +178,47 @@ impl Config {
         let path = Self::config_path();
         if path.exists() {
             if let Ok(data) = fs::read_to_string(&path) {
+                // Try loading new format first
                 if let Ok(mut cfg) = serde_json::from_str::<Config>(&data) {
-                    // Merge default nicks if user has none
                     let defaults = Self::default();
                     for (k, v) in &defaults.nick {
                         cfg.nick.entry(k.clone()).or_insert_with(|| v.clone());
                     }
                     return cfg;
+                }
+                // Try migrating from old format (bookmarks as HashMap<String, String>)
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&data) {
+                    if let Some(obj) = val.as_object() {
+                        if let Some(bm) = obj.get("bookmarks") {
+                            if let Some(bm_obj) = bm.as_object() {
+                                // Check if bookmarks are plain strings (old format)
+                                let needs_migrate = bm_obj.values().any(|v| v.is_string());
+                                if needs_migrate {
+                                    let mut migrated = val.clone();
+                                    let new_bm: serde_json::Map<String, serde_json::Value> = bm_obj.iter().map(|(k, v)| {
+                                        if v.is_string() {
+                                            (k.clone(), serde_json::json!({
+                                                "path": v.as_str().unwrap_or(""),
+                                                "tags": []
+                                            }))
+                                        } else {
+                                            (k.clone(), v.clone())
+                                        }
+                                    }).collect();
+                                    migrated["bookmarks"] = serde_json::Value::Object(new_bm);
+                                    if let Ok(mut cfg) = serde_json::from_value::<Config>(migrated) {
+                                        let defaults = Self::default();
+                                        for (k, v) in &defaults.nick {
+                                            cfg.nick.entry(k.clone()).or_insert_with(|| v.clone());
+                                        }
+                                        // Save migrated config
+                                        cfg.save();
+                                        return cfg;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

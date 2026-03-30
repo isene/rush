@@ -4,7 +4,7 @@ mod input;
 mod prompt;
 
 use config::{Config, State};
-use execute::{build_exe_cache, now_secs, Job};
+use execute::{build_exe_cache, now_secs, Job, Recording};
 use std::collections::HashMap;
 
 fn main() {
@@ -16,7 +16,8 @@ fn main() {
         let mut state = State::load();
         let exe_cache = build_exe_cache();
         let mut jobs: HashMap<u32, Job> = HashMap::new();
-        let code = execute::execute(&cmd, &mut config, &mut state, &exe_cache, &mut jobs);
+        let mut recording: Option<Recording> = None;
+        let code = execute::execute(&cmd, &mut config, &mut state, &exe_cache, &mut jobs, &mut recording);
         std::process::exit(code);
     }
 
@@ -56,6 +57,7 @@ fn main() {
     };
 
     let mut jobs: HashMap<u32, Job> = HashMap::new();
+    let mut recording: Option<Recording> = None;
 
     // Main loop
     loop {
@@ -91,6 +93,6 @@ fn main() {
         }
 
         // Execute
-        execute::execute(trimmed, &mut config, &mut state, &exe_cache, &mut jobs);
+        execute::execute(trimmed, &mut config, &mut state, &exe_cache, &mut jobs, &mut recording);
     }
 }

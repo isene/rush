@@ -2,14 +2,21 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::env;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::{self, Config, State};
+use crate::config::{self, Bookmark, Config, State};
 
 pub struct Job {
     pub pid: i32,
     pub cmd: String,
+}
+
+/// Active recording state (name, list of commands)
+pub struct Recording {
+    pub name: String,
+    pub commands: Vec<String>,
 }
 
 /// Expand history references: !!, !-N, !N
@@ -206,6 +213,44 @@ fn calc_skip_ws(expr: &str, pos: &mut usize) {
     }
 }
 
+/// Check validation rules before executing a command.
+/// Returns true if command should proceed, false if blocked.
+fn check_validation_rules(line: &str, rules: &HashMap<String, String>) -> bool {
+    for (pattern, action) in rules {
+        let re = match regex::Regex::new(pattern) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if re.is_match(line) {
+            match action.as_str() {
+                "block" => {
+                    eprintln!("rush: command blocked by validation rule (pattern: {})", pattern);
+                    return false;
+                }
+                "confirm" => {
+                    eprint!("rush: validation rule matched ({}). Proceed? [y/N] ", pattern);
+                    io::stderr().flush().ok();
+                    let mut answer = String::new();
+                    if io::stdin().read_line(&mut answer).is_ok() {
+                        let a = answer.trim().to_lowercase();
+                        if a != "y" && a != "yes" {
+                            eprintln!("Aborted.");
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                "warn" => {
+                    eprintln!("rush: warning, validation rule matched (pattern: {})", pattern);
+                }
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
 /// Execute a command line, handling pipes, redirects, builtins, nicks
 pub fn execute(
     line: &str,
@@ -213,6 +258,7 @@ pub fn execute(
     state: &mut State,
     exe_cache: &[String],
     jobs: &mut HashMap<u32, Job>,
+    recording: &mut Option<Recording>,
 ) -> i32 {
     let line = line.trim();
     if line.is_empty() {
@@ -230,14 +276,39 @@ pub fn execute(
 
     // Handle colon commands
     if line.starts_with(':') {
-        return handle_colon_command(&line, config, state, jobs);
+        return handle_colon_command(&line, config, state, jobs, recording);
+    }
+
+    // Handle AI prompts (@ and @@)
+    if line.starts_with("@@") {
+        return handle_ai_command(&line[2..].trim(), true);
+    }
+    if line.starts_with('@') {
+        return handle_ai_command(&line[1..].trim(), false);
+    }
+
+    // Check validation rules
+    if !check_validation_rules(&line, &config.validation_rules) {
+        return 1;
+    }
+
+    // Record command if recording is active
+    if let Some(ref mut rec) = recording {
+        if !line.starts_with(":record") {
+            rec.commands.push(line.clone());
+        }
     }
 
     // xrpn integration: = expr
     if line.starts_with('=') {
         let expr = &line[1..].trim();
         let cmd = format!("echo \"{},prx,off\" | xrpn", expr);
-        return run_via_shell(&cmd, &mut HashMap::new());
+        return run_via_shell(&cmd, jobs);
+    }
+
+    // fzf integration: bare 'f' runs fzf and cd to result
+    if line == "f" {
+        return handle_fzf();
     }
 
     // Builtins
@@ -309,8 +380,8 @@ pub fn execute(
     }
 
     // Check for bookmark
-    if let Some(path) = config.bookmarks.get(parts[0].as_str()) {
-        let path = path.clone();
+    if let Some(bm) = config.bookmarks.get(parts[0].as_str()) {
+        let path = bm.path.clone();
         if Path::new(&path).is_dir() {
             let _ = env::set_current_dir(&path);
             return 0;
@@ -411,7 +482,7 @@ fn cleanup_jobs(jobs: &mut HashMap<u32, Job>) {
     }
 }
 
-fn run_via_shell(line: &str, jobs: &mut HashMap<u32, Job>) -> i32 {
+fn run_via_shell(line: &str, _jobs: &mut HashMap<u32, Job>) -> i32 {
     let status = Command::new("bash")
         .arg("-c")
         .arg(line)
@@ -460,7 +531,112 @@ fn run_command(line: &str, background: bool, jobs: &mut HashMap<u32, Job>) -> i3
     }
 }
 
-fn handle_colon_command(line: &str, config: &mut Config, state: &mut State, jobs: &mut HashMap<u32, Job>) -> i32 {
+/// Handle fzf integration: run fzf and cd to selected directory
+fn handle_fzf() -> i32 {
+    // Check if fzf is in PATH
+    if Command::new("which").arg("fzf").output()
+        .map(|o| o.status.success()).unwrap_or(false)
+    {
+        let output = Command::new("fzf").output();
+        match output {
+            Ok(o) if o.status.success() => {
+                let selected = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !selected.is_empty() {
+                    let path = Path::new(&selected);
+                    let target = if path.is_dir() {
+                        selected.clone()
+                    } else if let Some(parent) = path.parent() {
+                        parent.to_string_lossy().to_string()
+                    } else {
+                        return 0;
+                    };
+                    if let Err(e) = env::set_current_dir(&target) {
+                        eprintln!("cd: {}: {}", target, e);
+                        return 1;
+                    }
+                }
+                0
+            }
+            _ => 1,
+        }
+    } else {
+        eprintln!("rush: fzf not found in PATH");
+        1
+    }
+}
+
+/// Handle AI integration (@ and @@)
+fn handle_ai_command(prompt: &str, suggest_cmd: bool) -> i32 {
+    if prompt.is_empty() {
+        eprintln!("Usage: @ <prompt> or @@ <prompt>");
+        return 1;
+    }
+
+    // Read API key
+    let key_path = "/home/.safe/openai.txt";
+    let api_key = match std::fs::read_to_string(key_path) {
+        Ok(k) => k.trim().to_string(),
+        Err(_) => {
+            eprintln!("rush: cannot read API key from {}", key_path);
+            return 1;
+        }
+    };
+
+    let system_msg = if suggest_cmd {
+        "You are a shell command assistant. Given the user's request, suggest a single shell command. Output ONLY the command, nothing else."
+    } else {
+        "You are a helpful assistant. Be concise."
+    };
+
+    let body = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3
+    });
+
+    let output = Command::new("curl")
+        .args([
+            "-s",
+            "https://api.openai.com/v1/chat/completions",
+            "-H", "Content-Type: application/json",
+            "-H", &format!("Authorization: Bearer {}", api_key),
+            "-d", &body.to_string(),
+        ])
+        .output();
+
+    match output {
+        Ok(o) => {
+            let response = String::from_utf8_lossy(&o.stdout);
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&response) {
+                if let Some(content) = val["choices"][0]["message"]["content"].as_str() {
+                    println!("{}", content.trim());
+                    return 0;
+                }
+                if let Some(err) = val["error"]["message"].as_str() {
+                    eprintln!("AI error: {}", err);
+                    return 1;
+                }
+            }
+            eprintln!("rush: unexpected AI response");
+            1
+        }
+        Err(e) => {
+            eprintln!("rush: curl failed: {}", e);
+            1
+        }
+    }
+}
+
+fn handle_colon_command(
+    line: &str,
+    config: &mut Config,
+    state: &mut State,
+    jobs: &mut HashMap<u32, Job>,
+    recording: &mut Option<Recording>,
+) -> i32 {
     let line = &line[1..]; // strip ':'
     let parts: Vec<&str> = line.splitn(2, ' ').collect();
     let cmd = parts[0];
@@ -497,21 +673,65 @@ fn handle_colon_command(line: &str, config: &mut Config, state: &mut State, jobs
         }
         "bm" | "bookmark" => {
             if args.is_empty() {
-                for (k, v) in &config.bookmarks {
-                    println!("  {} -> {}", k, v);
+                for (k, bm) in &config.bookmarks {
+                    if bm.tags.is_empty() {
+                        println!("  {} -> {}", k, bm.path);
+                    } else {
+                        println!("  {} -> {} [{}]", k, bm.path, bm.tags.join(", "));
+                    }
                 }
             } else if args.starts_with('-') {
                 config.bookmarks.remove(&args[1..]);
                 config.save();
+            } else if args.starts_with('?') {
+                // Search by tag
+                let search_tag = &args[1..].trim();
+                let mut found = false;
+                for (k, bm) in &config.bookmarks {
+                    if bm.tags.iter().any(|t| t == search_tag) {
+                        println!("  {} -> {} [{}]", k, bm.path, bm.tags.join(", "));
+                        found = true;
+                    }
+                }
+                if !found {
+                    println!("No bookmarks with tag '{}'", search_tag);
+                }
             } else {
-                let bm_parts: Vec<&str> = args.splitn(2, ' ').collect();
+                let bm_parts: Vec<&str> = args.splitn(3, ' ').collect();
                 let name = bm_parts[0];
-                let path = if bm_parts.len() > 1 {
-                    bm_parts[1].to_string()
-                } else {
-                    env::current_dir().unwrap_or_default().to_string_lossy().to_string()
-                };
-                config.bookmarks.insert(name.to_string(), path);
+
+                // Check if there's a #tags part
+                let mut path_str = String::new();
+                let mut tags = Vec::new();
+
+                if bm_parts.len() > 1 {
+                    // Parse path and optional tags
+                    let rest = if bm_parts.len() == 3 {
+                        format!("{} {}", bm_parts[1], bm_parts[2])
+                    } else {
+                        bm_parts[1].to_string()
+                    };
+
+                    if let Some(hash_pos) = rest.find('#') {
+                        path_str = rest[..hash_pos].trim().to_string();
+                        let tag_str = &rest[hash_pos + 1..];
+                        tags = tag_str.split(',')
+                            .map(|t| t.trim().to_string())
+                            .filter(|t| !t.is_empty())
+                            .collect();
+                    } else {
+                        path_str = rest.trim().to_string();
+                    }
+                }
+
+                if path_str.is_empty() {
+                    path_str = env::current_dir().unwrap_or_default().to_string_lossy().to_string();
+                }
+
+                config.bookmarks.insert(name.to_string(), Bookmark {
+                    path: path_str,
+                    tags,
+                });
                 config.save();
             }
             0
@@ -556,7 +776,6 @@ fn handle_colon_command(line: &str, config: &mut Config, state: &mut State, jobs
             }
             match calc_eval(args) {
                 Ok(val) => {
-                    // Display as integer if it's a whole number
                     if val.fract() == 0.0 && val.abs() < 1e15 {
                         println!("{}", val as i64);
                     } else {
@@ -611,30 +830,399 @@ fn handle_colon_command(line: &str, config: &mut Config, state: &mut State, jobs
                 1
             }
         }
+        // Session management
+        "save_session" => {
+            if args.is_empty() {
+                eprintln!("Usage: :save_session <name>");
+                return 1;
+            }
+            let sessions_dir = dirs::home_dir().unwrap_or_default().join(".rush/sessions");
+            let _ = std::fs::create_dir_all(&sessions_dir);
+            let session = serde_json::json!({
+                "pwd": env::current_dir().unwrap_or_default().to_string_lossy().to_string(),
+                "history": state.history,
+                "bookmarks": config.bookmarks,
+                "nick": config.nick,
+            });
+            let path = sessions_dir.join(format!("{}.json", args));
+            match std::fs::write(&path, serde_json::to_string_pretty(&session).unwrap_or_default()) {
+                Ok(_) => { println!("Session '{}' saved", args); 0 }
+                Err(e) => { eprintln!("Failed to save session: {}", e); 1 }
+            }
+        }
+        "load_session" => {
+            if args.is_empty() {
+                eprintln!("Usage: :load_session <name>");
+                return 1;
+            }
+            let path = dirs::home_dir().unwrap_or_default()
+                .join(".rush/sessions")
+                .join(format!("{}.json", args));
+            match std::fs::read_to_string(&path) {
+                Ok(data) => {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&data) {
+                        if let Some(pwd) = val["pwd"].as_str() {
+                            let _ = env::set_current_dir(pwd);
+                        }
+                        if let Some(hist) = val["history"].as_array() {
+                            state.history = hist.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect();
+                        }
+                        if let Ok(bm) = serde_json::from_value(val["bookmarks"].clone()) {
+                            config.bookmarks = bm;
+                        }
+                        if let Ok(nk) = serde_json::from_value(val["nick"].clone()) {
+                            config.nick = nk;
+                        }
+                        println!("Session '{}' loaded", args);
+                        config.save();
+                        state.save();
+                        0
+                    } else {
+                        eprintln!("Failed to parse session file");
+                        1
+                    }
+                }
+                Err(_) => {
+                    eprintln!("Session '{}' not found", args);
+                    1
+                }
+            }
+        }
+        "list_sessions" => {
+            let sessions_dir = dirs::home_dir().unwrap_or_default().join(".rush/sessions");
+            if sessions_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+                    let mut found = false;
+                    for entry in entries.flatten() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if name.ends_with(".json") {
+                                println!("  {}", &name[..name.len() - 5]);
+                                found = true;
+                            }
+                        }
+                    }
+                    if !found {
+                        println!("No saved sessions");
+                    }
+                }
+            } else {
+                println!("No saved sessions");
+            }
+            0
+        }
+        "delete_session" => {
+            if args.is_empty() {
+                eprintln!("Usage: :delete_session <name>");
+                return 1;
+            }
+            let path = dirs::home_dir().unwrap_or_default()
+                .join(".rush/sessions")
+                .join(format!("{}.json", args));
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+                println!("Session '{}' deleted", args);
+                0
+            } else {
+                eprintln!("Session '{}' not found", args);
+                1
+            }
+        }
+        // Recording & Replay
+        "record" => {
+            let rec_parts: Vec<&str> = args.splitn(2, ' ').collect();
+            let sub = if rec_parts.is_empty() { "" } else { rec_parts[0] };
+            let rec_args = if rec_parts.len() > 1 { rec_parts[1].trim() } else { "" };
+            match sub {
+                "start" => {
+                    if rec_args.is_empty() {
+                        eprintln!("Usage: :record start <name>");
+                        return 1;
+                    }
+                    *recording = Some(Recording {
+                        name: rec_args.to_string(),
+                        commands: Vec::new(),
+                    });
+                    println!("Recording started: {}", rec_args);
+                    0
+                }
+                "stop" => {
+                    if let Some(rec) = recording.take() {
+                        let count = rec.commands.len();
+                        state.recordings.insert(rec.name.clone(), rec.commands);
+                        state.save();
+                        println!("Recording '{}' stopped ({} commands)", rec.name, count);
+                    } else {
+                        eprintln!("No active recording");
+                    }
+                    0
+                }
+                "show" => {
+                    if rec_args.is_empty() {
+                        // List all recordings
+                        if state.recordings.is_empty() {
+                            println!("No recordings");
+                        } else {
+                            for (name, cmds) in &state.recordings {
+                                println!("  {} ({} commands)", name, cmds.len());
+                            }
+                        }
+                    } else if let Some(cmds) = state.recordings.get(rec_args) {
+                        for (i, c) in cmds.iter().enumerate() {
+                            println!("  {:3} {}", i + 1, c);
+                        }
+                    } else {
+                        eprintln!("Recording '{}' not found", rec_args);
+                        return 1;
+                    }
+                    0
+                }
+                _ => {
+                    eprintln!("Usage: :record start|stop|show [name]");
+                    1
+                }
+            }
+        }
+        "replay" => {
+            if args.is_empty() {
+                eprintln!("Usage: :replay <name>");
+                return 1;
+            }
+            if let Some(cmds) = state.recordings.get(args).cloned() {
+                println!("Replaying '{}' ({} commands)", args, cmds.len());
+                let mut last_code = 0;
+                for c in &cmds {
+                    println!("$ {}", c);
+                    last_code = execute(c, config, state, &[], jobs, recording);
+                }
+                last_code
+            } else {
+                eprintln!("Recording '{}' not found", args);
+                1
+            }
+        }
+        // Validation rules
+        "validate" => {
+            if args.is_empty() {
+                if config.validation_rules.is_empty() {
+                    println!("No validation rules");
+                } else {
+                    for (pattern, action) in &config.validation_rules {
+                        println!("  {} = {}", pattern, action);
+                    }
+                }
+            } else if args.starts_with('-') {
+                let pattern = &args[1..];
+                config.validation_rules.remove(pattern);
+                config.save();
+                println!("Validation rule removed: {}", pattern);
+            } else if let Some((pattern, action)) = args.split_once('=') {
+                let pattern = pattern.trim().to_string();
+                let action = action.trim().to_string();
+                if action != "block" && action != "confirm" && action != "warn" {
+                    eprintln!("Action must be: block, confirm, or warn");
+                    return 1;
+                }
+                config.validation_rules.insert(pattern, action);
+                config.save();
+                println!("Validation rule added");
+            } else {
+                eprintln!("Usage: :validate [pattern = action | -pattern]");
+                eprintln!("  Actions: block, confirm, warn");
+                return 1;
+            }
+            0
+        }
+        // Environment variables
+        "env" => {
+            let env_parts: Vec<&str> = args.splitn(3, ' ').collect();
+            if args.is_empty() {
+                // List all
+                let mut vars: Vec<(String, String)> = env::vars().collect();
+                vars.sort();
+                for (k, v) in &vars {
+                    println!("  {}={}", k, v);
+                }
+            } else if env_parts[0] == "set" && env_parts.len() >= 3 {
+                env::set_var(env_parts[1], env_parts[2]);
+                println!("{}={}", env_parts[1], env_parts[2]);
+            } else if env_parts[0] == "unset" && env_parts.len() >= 2 {
+                env::remove_var(env_parts[1]);
+                println!("Unset {}", env_parts[1]);
+            } else {
+                // Show specific variable
+                let var_name = args.trim();
+                match env::var(var_name) {
+                    Ok(val) => println!("  {}={}", var_name, val),
+                    Err(_) => eprintln!("  {} not set", var_name),
+                }
+            }
+            0
+        }
+        // Config command
+        "config" => {
+            if args.is_empty() {
+                println!("  history_dedup = {}", config.history_dedup);
+                println!("  auto_correct = {}", config.auto_correct);
+                println!("  completion_fuzzy = {}", config.completion_fuzzy);
+                println!("  completion_case_sensitive = {}", config.completion_case_sensitive);
+                println!("  completion_limit = {}", config.completion_limit);
+                println!("  show_tips = {}", config.show_tips);
+                println!("  c_prompt = {}", config.c_prompt);
+                println!("  c_cmd = {}", config.c_cmd);
+                println!("  c_nick = {}", config.c_nick);
+                println!("  c_gnick = {}", config.c_gnick);
+                println!("  c_path = {}", config.c_path);
+                println!("  c_switch = {}", config.c_switch);
+                println!("  c_bookmark = {}", config.c_bookmark);
+                println!("  c_colon = {}", config.c_colon);
+                println!("  c_tabselect = {}", config.c_tabselect);
+                println!("  c_taboption = {}", config.c_taboption);
+                println!("  c_dir = {}", config.c_dir);
+                println!("  c_exec = {}", config.c_exec);
+                println!("  c_file = {}", config.c_file);
+                println!("  c_suggestion = {}", config.c_suggestion);
+            } else {
+                let cfg_parts: Vec<&str> = args.splitn(2, ' ').collect();
+                if cfg_parts.len() < 2 {
+                    eprintln!("Usage: :config <key> <value>");
+                    return 1;
+                }
+                let key = cfg_parts[0];
+                let val = cfg_parts[1].trim();
+                match key {
+                    "history_dedup" => {
+                        if val == "off" || val == "full" || val == "smart" {
+                            config.history_dedup = val.to_string();
+                        } else {
+                            eprintln!("Valid values: off, full, smart");
+                            return 1;
+                        }
+                    }
+                    "auto_correct" => { config.auto_correct = val == "true"; }
+                    "completion_fuzzy" => { config.completion_fuzzy = val == "true"; }
+                    "completion_case_sensitive" => { config.completion_case_sensitive = val == "true"; }
+                    "completion_limit" => {
+                        if let Ok(n) = val.parse::<usize>() {
+                            config.completion_limit = n;
+                        } else {
+                            eprintln!("Invalid number");
+                            return 1;
+                        }
+                    }
+                    "show_tips" => { config.show_tips = val == "true"; }
+                    "c_prompt" | "c_cmd" | "c_nick" | "c_gnick" | "c_path" |
+                    "c_switch" | "c_bookmark" | "c_colon" | "c_tabselect" |
+                    "c_taboption" | "c_dir" | "c_exec" | "c_file" | "c_suggestion" => {
+                        if let Ok(n) = val.parse::<u8>() {
+                            match key {
+                                "c_prompt" => config.c_prompt = n,
+                                "c_cmd" => config.c_cmd = n,
+                                "c_nick" => config.c_nick = n,
+                                "c_gnick" => config.c_gnick = n,
+                                "c_path" => config.c_path = n,
+                                "c_switch" => config.c_switch = n,
+                                "c_bookmark" => config.c_bookmark = n,
+                                "c_colon" => config.c_colon = n,
+                                "c_tabselect" => config.c_tabselect = n,
+                                "c_taboption" => config.c_taboption = n,
+                                "c_dir" => config.c_dir = n,
+                                "c_exec" => config.c_exec = n,
+                                "c_file" => config.c_file = n,
+                                "c_suggestion" => config.c_suggestion = n,
+                                _ => {}
+                            }
+                        } else {
+                            eprintln!("Invalid color value (0-255)");
+                            return 1;
+                        }
+                    }
+                    _ => {
+                        eprintln!("Unknown config key: {}", key);
+                        return 1;
+                    }
+                }
+                config.save();
+                println!("  {} = {}", key, val);
+            }
+            0
+        }
+        // Version and info
+        "version" => {
+            println!("rush 0.1.0");
+            0
+        }
+        "info" => {
+            println!("\x1b[1mrush\x1b[0m - a fast terminal shell written in Rust");
+            println!();
+            println!("Features:");
+            println!("  - Nick aliases and global nicks (parametrized)");
+            println!("  - Bookmarks with tags");
+            println!("  - Tab completion (commands, files, smart subcommands)");
+            println!("  - History suggestions (right arrow to accept)");
+            println!("  - History search (Shift-Tab)");
+            println!("  - Syntax highlighting");
+            println!("  - Color themes (default, solarized, dracula, gruvbox, nord, monokai)");
+            println!("  - Built-in calculator");
+            println!("  - xrpn RPN calculator integration");
+            println!("  - Background jobs");
+            println!("  - File auto-open");
+            println!("  - History expansion (!!, !N, !-N)");
+            println!("  - Sessions (save/load shell state)");
+            println!("  - Command recording and replay");
+            println!("  - Validation rules (block/confirm/warn)");
+            println!("  - Environment variable management");
+            println!("  - AI integration (@ prompt, @@ for commands)");
+            println!("  - fzf integration (type 'f' to fuzzy find)");
+            println!("  - Completion learning (most-used completions ranked higher)");
+            println!("  - Edit line in $EDITOR (Ctrl-G)");
+            0
+        }
         "help" => {
             println!("\x1b[1mrush commands:\x1b[0m");
-            println!("  :nick [name = val | -name]   Aliases");
-            println!("  :gnick [name = val | -name]  Global aliases");
-            println!("  :bm [name [path] | -name]    Bookmarks");
-            println!("  :dirs                         Directory history");
-            println!("  :history [n]                  Command history");
-            println!("  :rehash                       Rebuild command cache");
-            println!("  :theme [name]                 Set color theme");
-            println!("  :calc <expr>                  Calculator (+,-,*,/,%,**,sqrt,sin,cos,tan,log)");
-            println!("  = <expr>                      xrpn RPN calculator");
-            println!("  :stats                        Top 20 most-used commands");
-            println!("  :jobs                         List background jobs");
-            println!("  :fg <n>                       Bring job to foreground");
-            println!("  :help                         This help");
+            println!("  :nick [name = val | -name]       Aliases");
+            println!("  :gnick [name = val | -name]      Global aliases");
+            println!("  :bm [name [path] [#tags] | -name | ?tag]  Bookmarks");
+            println!("  :dirs                             Directory history");
+            println!("  :history [n]                      Command history");
+            println!("  :rehash                           Rebuild command cache");
+            println!("  :theme [name]                     Set color theme");
+            println!("  :calc <expr>                      Calculator (+,-,*,/,%,**,sqrt,sin,cos,tan,log)");
+            println!("  = <expr>                          xrpn RPN calculator");
+            println!("  :stats                            Top 20 most-used commands");
+            println!("  :jobs                             List background jobs");
+            println!("  :fg <n>                           Bring job to foreground");
+            println!("  :env [VAR | set VAR val | unset VAR]  Environment variables");
+            println!("  :config [key value]               View/change settings");
+            println!("  :validate [pattern = action | -pattern]  Validation rules");
+            println!("  :save_session <name>              Save session state");
+            println!("  :load_session <name>              Load session state");
+            println!("  :list_sessions                    List saved sessions");
+            println!("  :delete_session <name>            Delete a session");
+            println!("  :record start|stop|show [name]    Record commands");
+            println!("  :replay <name>                    Replay recorded commands");
+            println!("  :version                          Show version");
+            println!("  :info                             Show feature overview");
+            println!("  :help                             This help");
             println!();
             println!("\x1b[1mHistory expansion:\x1b[0m");
-            println!("  !!                            Last command");
-            println!("  !N                            Command number N");
-            println!("  !-N                           Nth previous command");
+            println!("  !!                                Last command");
+            println!("  !N                                Command number N");
+            println!("  !-N                               Nth previous command");
+            println!();
+            println!("\x1b[1mAI integration:\x1b[0m");
+            println!("  @ <prompt>                        Ask AI a question");
+            println!("  @@ <prompt>                       Ask AI for a shell command");
+            println!();
+            println!("\x1b[1mSpecial:\x1b[0m");
+            println!("  f                                 Fuzzy find with fzf");
             println!();
             println!("\x1b[1mKeys:\x1b[0m");
-            println!("  Ctrl-G                        Edit line in $EDITOR");
-            println!("  Right arrow                   Accept history suggestion");
+            println!("  Tab                               Completion");
+            println!("  Shift-Tab                         History search");
+            println!("  Ctrl-G                            Edit line in $EDITOR");
+            println!("  Right arrow                       Accept history suggestion");
             0
         }
         _ => {

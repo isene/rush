@@ -59,6 +59,12 @@ pub fn getline(
     let mut hist_pos: Option<usize> = None;
     let mut saved_buf = String::new();
 
+    // History search state
+    let mut history_search_active = false;
+    let mut history_search_buf = String::new();
+    let mut history_search_matches: Vec<String> = Vec::new();
+    let mut history_search_index: usize = 0;
+
     terminal::enable_raw_mode().ok();
 
     let result = loop {
@@ -69,6 +75,63 @@ pub fn getline(
                 continue;
             }
         };
+
+        // Handle history search mode
+        if history_search_active {
+            match ev {
+                Event::Key(KeyEvent { code, modifiers, .. }) => {
+                    match (code, modifiers) {
+                        (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                            // Cancel search
+                            history_search_active = false;
+                            // Clear search display and redraw
+                            print!("\r\x1b[K");
+                            print!("\r{}", prompt_str);
+                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                        }
+                        (KeyCode::Enter, _) => {
+                            // Accept selected match
+                            history_search_active = false;
+                            if !history_search_matches.is_empty() && history_search_index < history_search_matches.len() {
+                                buf = history_search_matches[history_search_index].clone();
+                                cursor = buf.len();
+                            }
+                            // Clear search display and redraw
+                            print!("\r\x1b[K");
+                            print!("\r{}", prompt_str);
+                            redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                        }
+                        (KeyCode::Up, _) => {
+                            if !history_search_matches.is_empty() && history_search_index + 1 < history_search_matches.len() {
+                                history_search_index += 1;
+                            }
+                            draw_history_search(&history_search_buf, &history_search_matches, history_search_index, prompt_width);
+                        }
+                        (KeyCode::Down, _) => {
+                            if history_search_index > 0 {
+                                history_search_index -= 1;
+                            }
+                            draw_history_search(&history_search_buf, &history_search_matches, history_search_index, prompt_width);
+                        }
+                        (KeyCode::Backspace, _) => {
+                            history_search_buf.pop();
+                            history_search_matches = find_history_matches(&history_search_buf, &state.history);
+                            history_search_index = 0;
+                            draw_history_search(&history_search_buf, &history_search_matches, history_search_index, prompt_width);
+                        }
+                        (KeyCode::Char(c), _) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                            history_search_buf.push(c);
+                            history_search_matches = find_history_matches(&history_search_buf, &state.history);
+                            history_search_index = 0;
+                            draw_history_search(&history_search_buf, &history_search_matches, history_search_index, prompt_width);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
 
         match ev {
             Event::Key(KeyEvent { code, modifiers, .. }) => {
@@ -95,9 +158,22 @@ pub fn getline(
                         println!();
                         break Some(buf);
                     }
+                    // Shift-Tab: history search
+                    (KeyCode::BackTab, _) => {
+                        history_search_active = true;
+                        history_search_buf.clear();
+                        history_search_matches = find_history_matches("", &state.history);
+                        history_search_index = 0;
+                        draw_history_search(&history_search_buf, &history_search_matches, history_search_index, prompt_width);
+                    }
                     // Tab: completion
                     (KeyCode::Tab, _) => {
-                        if let Some(completed) = complete(&buf, cursor, exe_cache, config) {
+                        if let Some(completed) = complete(&buf, cursor, exe_cache, config, &state.completion_weights) {
+                            // Track completion weight for the accepted completion
+                            let parts: Vec<&str> = completed.trim().split_whitespace().collect();
+                            if let Some(first) = parts.first() {
+                                *state.completion_weights.entry(first.to_string()).or_insert(0) += 1;
+                            }
                             buf = completed;
                             cursor = buf.len();
                             redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
@@ -264,6 +340,46 @@ pub fn getline(
     result
 }
 
+/// Find history entries matching a search string (substring match)
+fn find_history_matches(query: &str, history: &[String]) -> Vec<String> {
+    let mut matches: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for entry in history.iter().rev() {
+        if (query.is_empty() || entry.contains(query)) && seen.insert(entry.clone()) {
+            matches.push(entry.clone());
+            if matches.len() >= 10 {
+                break;
+            }
+        }
+    }
+    matches
+}
+
+/// Draw the history search UI below the prompt
+fn draw_history_search(query: &str, matches: &[String], selected: usize, _prompt_width: usize) {
+    // Save cursor, move to line below, clear everything below
+    let display_count = matches.len().min(5);
+
+    // Move to next line and draw search UI
+    print!("\r\n\x1b[K\x1b[38;5;243m(search): \x1b[0m{}", query);
+
+    for (i, m) in matches.iter().take(5).enumerate() {
+        print!("\r\n\x1b[K");
+        if i == selected {
+            print!("\x1b[7m  {}\x1b[0m", m); // Reverse video for selected
+        } else {
+            print!("  \x1b[38;5;244m{}\x1b[0m", m);
+        }
+    }
+
+    // Move cursor back up to the search line
+    let lines_down = display_count + 1;
+    print!("\x1b[{}A", lines_down);
+    // Position cursor at end of search query
+    print!("\r\x1b[{}C", 10 + query.len()); // "(search): " is 10 chars
+    io::stdout().flush().ok();
+}
+
 fn redraw_line(prompt: &str, buf: &str, cursor: usize, config: &Config, exe_cache: &[String], history: &[String]) {
     let prompt_width = visible_len(prompt);
     let highlighted = syntax_highlight(buf, config, exe_cache);
@@ -353,33 +469,38 @@ fn syntax_highlight(line: &str, config: &Config, exe_cache: &[String]) -> String
     result
 }
 
-/// Tab completion
-fn complete(buf: &str, cursor: usize, exe_cache: &[String], config: &Config) -> Option<String> {
+/// Tab completion with learning weights
+fn complete(buf: &str, cursor: usize, exe_cache: &[String], config: &Config, weights: &std::collections::HashMap<String, usize>) -> Option<String> {
     let prefix = &buf[..cursor];
     let parts: Vec<&str> = prefix.split_whitespace().collect();
 
     let (completions, word_start) = if parts.is_empty() || (parts.len() == 1 && !prefix.ends_with(' ')) {
         // Complete command
         let word = parts.first().copied().unwrap_or("");
-        let mut matches: Vec<&str> = exe_cache
+        let mut matches: Vec<String> = exe_cache
             .iter()
             .filter(|e| e.starts_with(word))
-            .map(|s| s.as_str())
+            .map(|s| s.to_string())
             .collect();
         // Also check nicks and bookmarks
         for k in config.nick.keys() {
-            if k.starts_with(word) && !matches.contains(&k.as_str()) {
-                matches.push(k.as_str());
+            if k.starts_with(word) && !matches.contains(k) {
+                matches.push(k.clone());
             }
         }
         for k in config.bookmarks.keys() {
-            if k.starts_with(word) && !matches.contains(&k.as_str()) {
-                matches.push(k.as_str());
+            if k.starts_with(word) && !matches.contains(k) {
+                matches.push(k.clone());
             }
         }
-        matches.sort();
+        // Sort by completion weight (most used first), then alphabetically
+        matches.sort_by(|a, b| {
+            let wa = weights.get(a).copied().unwrap_or(0);
+            let wb = weights.get(b).copied().unwrap_or(0);
+            wb.cmp(&wa).then(a.cmp(b))
+        });
         matches.truncate(config.completion_limit);
-        (matches.iter().map(|s| s.to_string()).collect::<Vec<_>>(), prefix.rfind(' ').map(|i| i + 1).unwrap_or(0))
+        (matches, prefix.rfind(' ').map(|i| i + 1).unwrap_or(0))
     } else {
         // Smart command-specific completions
         let cmd = parts[0];
