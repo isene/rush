@@ -696,7 +696,7 @@ fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &C
             .filter(|e| e.starts_with(word))
             .map(|s| s.to_string())
             .collect();
-        // Also check nicks and bookmarks
+        // Also check nicks, bookmarks, and colon commands
         for k in config.nick.keys() {
             if k.starts_with(word) && !matches.contains(k) {
                 matches.push(k.clone());
@@ -705,6 +705,21 @@ fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &C
         for k in config.bookmarks.keys() {
             if k.starts_with(word) && !matches.contains(k) {
                 matches.push(k.clone());
+            }
+        }
+        // Colon commands
+        if word.starts_with(':') {
+            let colon_cmds = [
+                ":nick", ":gnick", ":bm", ":bookmark", ":dirs", ":history",
+                ":rehash", ":theme", ":calc", ":stats", ":jobs", ":fg",
+                ":env", ":config", ":validate", ":save_session", ":load_session",
+                ":list_sessions", ":delete_session", ":record", ":replay",
+                ":version", ":info", ":help",
+            ];
+            for cmd in &colon_cmds {
+                if cmd.starts_with(word) && !matches.iter().any(|m| m == cmd) {
+                    matches.push(cmd.to_string());
+                }
             }
         }
         // Sort by completion weight (most used first), then alphabetically
