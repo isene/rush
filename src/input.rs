@@ -647,8 +647,8 @@ pub fn getline(
                             set_cursor_col(prompt_width + display_width(&buf[..cursor]));
                         }
                     }
-                    // Regular char
-                    (KeyCode::Char(c), _) => {
+                    // Regular char (but never insert tab)
+                    (KeyCode::Char(c), _) if c != '\t' => {
                         undo_stack.push((buf.clone(), cursor));
                         if undo_stack.len() > max_undo { undo_stack.remove(0); }
 
