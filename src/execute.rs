@@ -807,6 +807,31 @@ fn handle_colon_command(
                 for (k, v) in &config.nick {
                     println!("  {} = {}", k, v);
                 }
+            } else if args.starts_with("--export") {
+                let file = args.strip_prefix("--export").unwrap().trim();
+                let file = if file.is_empty() { "nicks.json" } else { file };
+                if let Ok(data) = serde_json::to_string_pretty(&config.nick) {
+                    if let Err(e) = std::fs::write(file, data) {
+                        eprintln!("Error: {}", e);
+                    } else {
+                        println!("Exported {} nicks to {}", config.nick.len(), file);
+                    }
+                }
+            } else if args.starts_with("--import") {
+                let file = args.strip_prefix("--import").unwrap().trim();
+                let file = if file.is_empty() { "nicks.json" } else { file };
+                match std::fs::read_to_string(file) {
+                    Ok(data) => match serde_json::from_str::<HashMap<String, String>>(&data) {
+                        Ok(nicks) => {
+                            let count = nicks.len();
+                            config.nick.extend(nicks);
+                            config.save();
+                            println!("Imported {} nicks from {}", count, file);
+                        }
+                        Err(e) => eprintln!("Parse error: {}", e),
+                    },
+                    Err(e) => eprintln!("Read error: {}", e),
+                }
             } else if args.starts_with('-') {
                 config.nick.remove(&args[1..]);
                 config.save();
@@ -838,6 +863,31 @@ fn handle_colon_command(
                     } else {
                         println!("  {} -> {} [{}]", k, bm.path, bm.tags.join(", "));
                     }
+                }
+            } else if args.starts_with("--export") {
+                let file = args.strip_prefix("--export").unwrap().trim();
+                let file = if file.is_empty() { "bookmarks.json" } else { file };
+                if let Ok(data) = serde_json::to_string_pretty(&config.bookmarks) {
+                    if let Err(e) = std::fs::write(file, data) {
+                        eprintln!("Error: {}", e);
+                    } else {
+                        println!("Exported {} bookmarks to {}", config.bookmarks.len(), file);
+                    }
+                }
+            } else if args.starts_with("--import") {
+                let file = args.strip_prefix("--import").unwrap().trim();
+                let file = if file.is_empty() { "bookmarks.json" } else { file };
+                match std::fs::read_to_string(file) {
+                    Ok(data) => match serde_json::from_str::<HashMap<String, crate::config::Bookmark>>(&data) {
+                        Ok(bms) => {
+                            let count = bms.len();
+                            config.bookmarks.extend(bms);
+                            config.save();
+                            println!("Imported {} bookmarks from {}", count, file);
+                        }
+                        Err(e) => eprintln!("Parse error: {}", e),
+                    },
+                    Err(e) => eprintln!("Read error: {}", e),
                 }
             } else if args.starts_with('-') {
                 config.bookmarks.remove(&args[1..]);
@@ -960,6 +1010,13 @@ fn handle_colon_command(
                     println!("  {:4} {}", idx, cmd);
                 }
             }
+            0
+        }
+        "rmhistory" => {
+            state.history.clear();
+            state.history_times.clear();
+            state.save();
+            println!("History cleared");
             0
         }
         "rehash" => {

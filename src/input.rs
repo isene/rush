@@ -1153,7 +1153,7 @@ fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &C
         // Colon commands
         if word.starts_with(':') {
             let colon_cmds = [
-                ":nick", ":gnick", ":bm", ":bookmark", ":dirs", ":history",
+                ":nick", ":gnick", ":abbrev", ":bm", ":bookmark", ":dirs", ":history", ":rmhistory",
                 ":rehash", ":theme", ":calc", ":stats", ":jobs", ":fg",
                 ":env", ":config", ":validate", ":save_session", ":load_session",
                 ":list_sessions", ":delete_session", ":record", ":replay",
