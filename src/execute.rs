@@ -343,7 +343,7 @@ pub fn execute(
     match parts[0].as_str() {
         "r" => {
             // Launch file manager
-            let fm = &config.file_manager;
+            let fm = if config.file_manager.is_empty() { "rtfm" } else { &config.file_manager };
             let _ = std::process::Command::new(fm).status();
             return 0;
         }
@@ -792,6 +792,8 @@ fn handle_colon_command(
 
     match cmd {
         "nick" => {
+            // Strip surrounding quotes if present (e.g. :nick "r = rtfm")
+            let args = args.trim_matches('"').trim_matches('\'');
             if args.is_empty() {
                 for (k, v) in &config.nick {
                     println!("  {} = {}", k, v);
@@ -831,6 +833,7 @@ fn handle_colon_command(
             0
         }
         "gnick" => {
+            let args = args.trim_matches('"').trim_matches('\'');
             if args.is_empty() {
                 for (k, v) in &config.gnick {
                     println!("  {} = {}", k, v);
