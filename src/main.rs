@@ -13,6 +13,8 @@ use std::collections::HashMap;
 fn setup_signal_handlers() {
     unsafe {
         libc::signal(libc::SIGTSTP, libc::SIG_IGN);
+        // SIGHUP: terminal closed. Exit cleanly.
+        libc::signal(libc::SIGHUP, libc::SIG_DFL);
     }
 }
 
@@ -115,6 +117,13 @@ fn main() {
 
     // Main loop
     loop {
+        // Exit if terminal is gone
+        if unsafe { libc::isatty(0) } == 0 {
+            state.save();
+            config.save();
+            break;
+        }
+
         // Session autosave
         if config.session_autosave > 0 {
             let now = now_secs();

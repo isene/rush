@@ -216,7 +216,13 @@ pub fn getline(
         let ev = match event::read() {
             Ok(ev) => ev,
             Err(_) => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                // Terminal is likely gone (wezterm killed, ssh dropped, etc.)
+                if unsafe { libc::isatty(0) } == 0 {
+                    terminal::disable_raw_mode().ok();
+                    return None; // Exit cleanly
+                }
+                // Brief pause before retry for transient errors
+                std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
             }
         };
