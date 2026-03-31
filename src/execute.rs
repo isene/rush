@@ -599,10 +599,18 @@ fn run_via_shell(line: &str, _jobs: &mut HashMap<u32, Job>) -> i32 {
         line, tmpfile
     );
 
-    let status = Command::new("bash")
-        .arg("-c")
-        .arg(&wrapped)
-        .status();
+    use std::os::unix::process::CommandExt;
+    let mut bash_cmd = Command::new("bash");
+    bash_cmd.arg("-c").arg(&wrapped);
+    unsafe {
+        bash_cmd.pre_exec(|| {
+            libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    let status = bash_cmd.status();
 
     // Read PIPESTATUS from temp file
     if let Ok(ps) = std::fs::read_to_string(&tmpfile) {
@@ -652,7 +660,14 @@ fn run_command(line: &str, background: bool, jobs: &mut HashMap<u32, Job>) -> i3
         child_cmd.args(&args);
         unsafe {
             child_cmd.pre_exec(|| {
+                // New process group
                 libc::setpgid(0, 0);
+                // Restore default signal handlers for child
+                libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+                libc::signal(libc::SIGTTIN, libc::SIG_DFL);
+                libc::signal(libc::SIGTTOU, libc::SIG_DFL);
                 Ok(())
             });
         }

@@ -56,6 +56,9 @@ fn main() {
         source_login_files();
     }
 
+    // Source LS_COLORS
+    source_lscolors();
+
     // First-run welcome
     let first_run = !Config::config_path().exists();
 
@@ -213,6 +216,46 @@ fn main() {
         // Refresh exe cache if :rehash was called
         if trimmed.starts_with(":rehash") {
             exe_cache = state.exe_cache.clone();
+        }
+    }
+}
+
+fn source_lscolors() {
+    // Source LS_COLORS from common locations
+    for path in &[
+        "/home/geir/.local/share/lscolors.sh",
+        "~/.local/share/lscolors.sh",
+        "/etc/dircolors",
+    ] {
+        let expanded = if path.starts_with('~') {
+            let home = dirs::home_dir().unwrap_or_default().to_string_lossy().to_string();
+            path.replacen('~', &home, 1)
+        } else {
+            path.to_string()
+        };
+        if std::path::Path::new(&expanded).exists() {
+            if let Ok(content) = std::fs::read_to_string(&expanded) {
+                // Extract LS_COLORS='...' value directly
+                if let Some(start) = content.find("LS_COLORS='") {
+                    let rest = &content[start + 11..];
+                    if let Some(end) = rest.find('\'') {
+                        std::env::set_var("LS_COLORS", &rest[..end]);
+                        return;
+                    }
+                }
+                // Fallback: source via bash
+                if let Ok(output) = std::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(format!("source {} 2>/dev/null && echo $LS_COLORS", expanded))
+                    .output()
+                {
+                    let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !val.is_empty() {
+                        std::env::set_var("LS_COLORS", &val);
+                        return;
+                    }
+                }
+            }
         }
     }
 }
