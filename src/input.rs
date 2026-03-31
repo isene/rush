@@ -1004,7 +1004,7 @@ fn highlight_segment(segment: &str, config: &Config, exe_cache: &[String]) -> St
 
     let cmd = &parts[0];
     let ls_colors = parse_ls_colors();
-    const BUILTINS: &[&str] = &["cd", "exit", "quit", "export", "unset", "f", "r", "pushd", "popd"];
+    const BUILTINS: &[&str] = &["cd", "exit", "quit", "export", "unset", "pushd", "popd"];
 
     let cmd_color = if cmd.starts_with(':') {
         config.c_colon

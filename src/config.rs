@@ -163,6 +163,8 @@ impl Default for Config {
                 ("ll".to_string(), "ls -la --color -F".to_string()),
                 ("la".to_string(), "ls -a --color -F".to_string()),
                 ("grep".to_string(), "grep --color=auto".to_string()),
+                ("r".to_string(), "rtfm".to_string()),
+                ("f".to_string(), "fzf".to_string()),
             ]),
             gnick: HashMap::new(),
             bookmarks: HashMap::new(),

@@ -329,11 +329,6 @@ pub fn execute(
         return run_via_shell(&cmd, jobs);
     }
 
-    // fzf integration: bare 'f' runs fzf and cd to result
-    if line == "f" {
-        return handle_fzf();
-    }
-
     // Builtins
     let parts = shell_split(&line);
     if parts.is_empty() {
@@ -341,12 +336,6 @@ pub fn execute(
     }
 
     match parts[0].as_str() {
-        "r" => {
-            // Launch file manager
-            let fm = if config.file_manager.is_empty() { "rtfm" } else { &config.file_manager };
-            let _ = std::process::Command::new(fm).status();
-            return 0;
-        }
         "cd" => {
             let dir = if parts.len() > 1 {
                 let arg = &parts[1];
