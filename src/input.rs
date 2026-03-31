@@ -340,10 +340,17 @@ pub fn getline(
         match ev {
             Event::Key(KeyEvent { code, modifiers, .. }) => {
                 match (code, modifiers) {
-                    // Ctrl-C: clear line
+                    // Ctrl-C: clear line and redraw prompt
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        buf.clear();
+                        cursor = 0;
+                        print!("\r\x1b[K");
+                        io::stdout().flush().ok();
+                        terminal::disable_raw_mode().ok();
                         println!();
-                        break Some(String::new());
+                        terminal::enable_raw_mode().ok();
+                        redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
+                        continue;
                     }
                     // Ctrl-D: exit
                     (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
@@ -1155,6 +1162,22 @@ fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &C
             for cmd in &colon_cmds {
                 if cmd.starts_with(word) && !matches.iter().any(|m| m == cmd) {
                     matches.push(cmd.to_string());
+                }
+            }
+        }
+        // Also check files/dirs in current directory (for auto-cd)
+        if let Ok(entries) = std::fs::read_dir(".") {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with(word) && !matches.contains(&name.to_string())
+                        && (word.starts_with('.') || !name.starts_with('.'))
+                    {
+                        let mut completion = name.to_string();
+                        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                            completion.push('/');
+                        }
+                        matches.push(completion);
+                    }
                 }
             }
         }
