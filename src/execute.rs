@@ -655,13 +655,10 @@ fn run_command(line: &str, background: bool, jobs: &mut HashMap<u32, Job>) -> i3
         }
     } else {
         use std::os::unix::process::CommandExt;
-        // Spawn child in its own process group so Ctrl-Z suspends it, not rush
         let mut child_cmd = Command::new(cmd);
         child_cmd.args(&args);
         unsafe {
             child_cmd.pre_exec(|| {
-                // New process group
-                libc::setpgid(0, 0);
                 // Restore default signal handlers for child
                 libc::signal(libc::SIGTSTP, libc::SIG_DFL);
                 libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -671,31 +668,8 @@ fn run_command(line: &str, background: bool, jobs: &mut HashMap<u32, Job>) -> i3
                 Ok(())
             });
         }
-        match child_cmd.spawn() {
-            Ok(child) => {
-                let pid = child.id() as i32;
-                // Give the child's process group the terminal
-                unsafe { libc::tcsetpgrp(0, pid); }
-                // Wait, handling stopped status
-                let result = loop {
-                    match waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WUNTRACED)) {
-                        Ok(WaitStatus::Exited(_, code)) => break code,
-                        Ok(WaitStatus::Signaled(_, sig, _)) => break 128 + sig as i32,
-                        Ok(WaitStatus::Stopped(_, _)) => {
-                            // Child was suspended via Ctrl-Z
-                            let id = (jobs.keys().max().copied().unwrap_or(0)) + 1;
-                            eprintln!("\n[{}] Stopped  {}", id, line);
-                            jobs.insert(id, Job { pid, cmd: line.to_string(), status: JobStatus::Stopped });
-                            break 0;
-                        }
-                        Err(_) => break 1,
-                        _ => break 1,
-                    }
-                };
-                // Reclaim terminal for rush
-                unsafe { libc::tcsetpgrp(0, libc::getpgrp()); }
-                result
-            }
+        match child_cmd.status() {
+            Ok(s) => s.code().unwrap_or(1),
             Err(_e) => {
                 eprintln!("rush: {}: command not found", cmd);
                 127
