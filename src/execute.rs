@@ -476,7 +476,11 @@ pub fn execute(
                         return Command::new(&editor).arg(&expanded).status()
                             .map(|s| s.code().unwrap_or(1)).unwrap_or(127);
                     } else {
-                        return Command::new("xdg-open").arg(&expanded).spawn()
+                        return Command::new("xdg-open")
+                            .arg(&expanded)
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
                             .map(|_| 0).unwrap_or(127);
                     }
                 }
