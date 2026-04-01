@@ -487,6 +487,13 @@ pub fn execute(
     // Track frequency
     *state.cmd_frequency.entry(parts[0].clone()).or_insert(0) += 1;
 
+    // Inline env var assignment (VAR=val command): delegate to shell
+    if let Some(eq_pos) = parts[0].find('=') {
+        if eq_pos > 0 && parts[0][..eq_pos].chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && parts.len() > 1 {
+            return run_via_shell(&line, jobs);
+        }
+    }
+
     // Has pipes or redirects? Use shell
     if line.contains('|') || line.contains('>') || line.contains('<')
         || line.contains("&&") || line.contains("||") || line.contains('`')
