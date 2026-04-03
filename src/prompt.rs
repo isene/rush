@@ -48,10 +48,15 @@ pub fn build_prompt(config: &Config) -> String {
     // Set terminal window title via OSC
     let title = format!("\x1b]0;rush: {}\x07", cwd);
 
+    // Use root colors when running as root
+    let is_root = unsafe { libc::getuid() } == 0;
+    let user_color = if is_root { config.c_user_root } else { config.c_user };
+    let host_color = if is_root { config.c_host_root } else { config.c_host };
+
     // Prompt: user@host: cwd/ (git) >
     format!(
         "{}\x1b[38;5;{}m\x1b[1m{}\x1b[0m\x1b[38;5;{}m@{}\x1b[0m:\x1b[38;5;{}m {}/\x1b[0m{} \x1b[38;5;{}m>\x1b[0m ",
-        title, config.c_user, user, config.c_host, host, dir_color, cwd, git_str, config.c_prompt
+        title, user_color, user, host_color, host, dir_color, cwd, git_str, config.c_prompt
     )
 }
 

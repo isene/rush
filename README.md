@@ -49,6 +49,7 @@ A feature-complete terminal shell compiled to a single binary. Feature clone of 
 
 **Prompt:**
 - Configurable colors for user, host, cwd, git branch, prompt character
+- Root user/host colors (red by default, visible warning when running as root)
 - Directory-specific colors (pattern matching on path)
 - Right-side prompt: git dirty/clean indicator, command duration (>1s)
 - Window title updates via OSC escape
@@ -168,13 +169,14 @@ rush --login            # Login shell (sources profile files)
 
 ## Configuration
 
-All settings in `~/.rushrc.json`:
+All settings in `~/.rushrc.json`. Use **[crush](https://github.com/isene/crush)** for an interactive TUI configuration editor with live color preview, theme selection, and 256-color palette:
 
 ```json
 {
   "nick": { "ls": "ls --color -F" },
   "abbrev": { "gst": "git status" },
   "c_user": 2, "c_host": 2, "c_cwd": 81,
+  "c_user_root": 196, "c_host_root": 196,
   "c_prompt": 208, "c_cmd": 48,
   "dir_colors": [["MyProject", 172]],
   "show_cmd": true, "auto_correct": true,

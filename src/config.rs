@@ -66,6 +66,11 @@ pub struct Config {
     pub c_git: u8,
     #[serde(default = "default_c_stamp")]
     pub c_stamp: u8,
+    // Root user/host colors (red by default, used when running as root)
+    #[serde(default = "default_c_user_root")]
+    pub c_user_root: u8,
+    #[serde(default = "default_c_host_root")]
+    pub c_host_root: u8,
     // Directory-specific colors: [["pattern", color], ...]
     #[serde(default)]
     pub dir_colors: Vec<(String, u8)>,
@@ -74,6 +79,8 @@ pub struct Config {
 fn default_suggestion_color() -> u8 { 240 }
 fn default_c_user() -> u8 { 2 }
 fn default_c_host() -> u8 { 2 }
+fn default_c_user_root() -> u8 { 196 }
+fn default_c_host_root() -> u8 { 196 }
 fn default_c_cwd() -> u8 { 81 }
 fn default_c_git() -> u8 { 243 }
 fn default_c_stamp() -> u8 { 240 }
@@ -202,6 +209,8 @@ impl Default for Config {
             c_cwd: 81,
             c_git: 243,
             c_stamp: 240,
+            c_user_root: 196,
+            c_host_root: 196,
             dir_colors: vec![],
         }
     }
