@@ -346,15 +346,10 @@ pub fn getline(
         match ev {
             Event::Key(KeyEvent { code, modifiers, .. }) => {
                 match (code, modifiers) {
-                    // Ctrl-C: clear line and redraw prompt
+                    // Ctrl-C: clear line and redraw prompt in place
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                         buf.clear();
                         cursor = 0;
-                        print!("\r\x1b[K");
-                        io::stdout().flush().ok();
-                        terminal::disable_raw_mode().ok();
-                        println!();
-                        terminal::enable_raw_mode().ok();
                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                         continue;
                     }

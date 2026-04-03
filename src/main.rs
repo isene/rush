@@ -136,6 +136,14 @@ fn main() {
         // Cleanup finished background jobs
         execute::cleanup_jobs(&mut jobs);
 
+        // Refresh exe cache if stale (60s TTL)
+        let now = now_secs();
+        if now - state.exe_cache_time > 60 {
+            exe_cache = build_exe_cache();
+            state.exe_cache = exe_cache.clone();
+            state.exe_cache_time = now;
+        }
+
         let line = match input::getline(&config, &mut state, &exe_cache, last_cmd_duration) {
             Some(line) => line,
             None => {
