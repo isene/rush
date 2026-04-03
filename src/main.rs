@@ -7,14 +7,21 @@ mod prompt;
 use config::{Config, State};
 use execute::{build_exe_cache, now_secs, Job, Recording};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static RELOAD_FLAG: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn sigusr1_handler(_sig: libc::c_int) {
+    RELOAD_FLAG.store(true, Ordering::Relaxed);
+}
 
 /// Install SIGTSTP handler so Ctrl-Z does not suspend rush itself.
 /// Child processes still receive the signal via their own process group.
 fn setup_signal_handlers() {
     unsafe {
         libc::signal(libc::SIGTSTP, libc::SIG_IGN);
-        // SIGHUP: terminal closed. Exit cleanly.
         libc::signal(libc::SIGHUP, libc::SIG_DFL);
+        libc::signal(libc::SIGUSR1, sigusr1_handler as libc::sighandler_t);
     }
 }
 
@@ -233,6 +240,14 @@ fn main() {
         // Refresh exe cache if :rehash was called
         if trimmed.starts_with(":rehash") {
             exe_cache = state.exe_cache.clone();
+        }
+        // Refresh config if :reload was called
+        if trimmed.starts_with(":reload") {
+            // Config already reloaded by the command handler
+        }
+        // Check SIGUSR1 flag (sent by crush on exit)
+        if RELOAD_FLAG.swap(false, Ordering::Relaxed) {
+            config = Config::load();
         }
     }
 }

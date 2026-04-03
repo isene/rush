@@ -1017,6 +1017,11 @@ fn handle_colon_command(
             println!("Executable cache rebuilt: {} commands", state.exe_cache.len());
             0
         }
+        "reload" => {
+            *config = Config::load();
+            println!("Config reloaded from ~/.rushrc.json");
+            0
+        }
         "theme" => {
             if args.is_empty() {
                 println!("Available themes: {}", config::theme_names().join(", "));
@@ -1461,6 +1466,7 @@ fn handle_colon_command(
             println!("  :dirs                             Directory history");
             println!("  :history [n]                      Command history");
             println!("  :rehash                           Rebuild command cache");
+            println!("  :reload                           Reload config from ~/.rushrc.json");
             println!("  :theme [name]                     Set color theme");
             println!("  :calc <expr>                      Calculator (+,-,*,/,%,**,sqrt,sin,cos,tan,log)");
             println!("  = <expr>                          xrpn RPN calculator");
