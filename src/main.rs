@@ -19,9 +19,10 @@ extern "C" fn sigusr1_handler(_sig: libc::c_int) {
 /// Child processes still receive the signal via their own process group.
 fn setup_signal_handlers() {
     unsafe {
-        libc::signal(libc::SIGTSTP, libc::SIG_IGN);
-        libc::signal(libc::SIGHUP, libc::SIG_DFL);
-        libc::signal(libc::SIGUSR1, sigusr1_handler as libc::sighandler_t);
+        libc::signal(libc::SIGINT, libc::SIG_IGN);   // Ctrl+C: ignore in shell, children restore SIG_DFL
+        libc::signal(libc::SIGTSTP, libc::SIG_IGN);  // Ctrl+Z: ignore in shell
+        libc::signal(libc::SIGHUP, libc::SIG_DFL);   // Terminal closed: exit
+        libc::signal(libc::SIGUSR1, sigusr1_handler as libc::sighandler_t); // Config reload from crush
     }
 }
 
