@@ -61,18 +61,20 @@ fn is_executable(path: &str) -> bool {
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-static SWITCH_CACHE: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+static SWITCH_CACHE: OnceLock<Mutex<HashMap<String, Vec<(String, String)>>>> = OnceLock::new();
 
-/// Parse switches from `command --help` output, cached
-fn get_switches(cmd: &str) -> Vec<String> {
+/// Parse switches from `command --help` output, cached.
+/// Returns (switch_name, description) pairs.
+fn get_switches(cmd: &str) -> Vec<(String, String)> {
     let cache = SWITCH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().unwrap();
     if let Some(switches) = cache.get(cmd) {
         return switches.clone();
     }
 
-    let mut switches = Vec::new();
-    // Try --help first, then -h
+    let mut switches: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
     for flag in &["--help", "-h"] {
         if let Ok(output) = std::process::Command::new(cmd)
             .arg(flag)
@@ -81,24 +83,49 @@ fn get_switches(cmd: &str) -> Vec<String> {
             let text = String::from_utf8_lossy(&output.stdout).to_string()
                 + &String::from_utf8_lossy(&output.stderr);
             if !text.is_empty() {
-                // Extract switches: --word or -X patterns
-                let re = regex::Regex::new(r"(?:^|\s)(--?[a-zA-Z][\w-]*)").unwrap();
-                for cap in re.captures_iter(&text) {
-                    let sw = cap[1].to_string();
-                    if !switches.contains(&sw) {
-                        switches.push(sw);
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    // Match lines like: -x, --long-opt   description text
+                    let re = regex::Regex::new(r"^\s*(--?[a-zA-Z][\w-]*)(?:,\s*(--?[a-zA-Z][\w-]*))?(?:\s*[=\s]\S*)?\s{2,}(.+)").unwrap();
+                    if let Some(cap) = re.captures(trimmed) {
+                        let desc = cap.get(3).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
+                        if let Some(short) = cap.get(1) {
+                            let s = short.as_str().to_string();
+                            if seen.insert(s.clone()) { switches.push((s, desc.clone())); }
+                        }
+                        if let Some(long) = cap.get(2) {
+                            let s = long.as_str().to_string();
+                            if seen.insert(s.clone()) { switches.push((s, desc)); }
+                        }
+                    } else {
+                        // Simpler fallback: just extract flags without descriptions
+                        let re2 = regex::Regex::new(r"(?:^|\s)(--?[a-zA-Z][\w-]*)").unwrap();
+                        for cap2 in re2.captures_iter(trimmed) {
+                            let sw = cap2[1].to_string();
+                            if seen.insert(sw.clone()) {
+                                switches.push((sw, String::new()));
+                            }
+                        }
                     }
                 }
-                if !switches.is_empty() {
-                    break;
-                }
+                if !switches.is_empty() { break; }
             }
         }
     }
 
-    switches.sort();
+    switches.sort_by(|a, b| a.0.cmp(&b.0));
     cache.insert(cmd.to_string(), switches.clone());
     switches
+}
+
+/// Strip description suffix from completion string (e.g. "--flag  description" -> "--flag")
+fn strip_completion_desc(s: &str) -> String {
+    // Descriptions are separated by 2+ spaces from the flag
+    if let Some(pos) = s.find("  ") {
+        s[..pos].trim_end().to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 /// Find the best history match for the current prefix
@@ -398,8 +425,9 @@ pub fn getline(
                         let (completions, word_start) = gather_completions(&buf, cursor, exe_cache, config, &state.completion_weights);
                         if completions.len() == 1 {
                             let mut new_buf = buf[..word_start].to_string();
-                            new_buf.push_str(&completions[0]);
-                            if !completions[0].ends_with('/') { new_buf.push(' '); }
+                            let comp = strip_completion_desc(&completions[0]);
+                            new_buf.push_str(&comp);
+                            if !comp.ends_with('/') { new_buf.push(' '); }
                             if cursor < buf.len() { new_buf.push_str(&buf[cursor..]); }
                             let parts: Vec<&str> = new_buf.trim().split_whitespace().collect();
                             if let Some(first) = parts.first() {
@@ -429,10 +457,11 @@ pub fn getline(
                                     }
                                     Event::Key(KeyEvent { code: KeyCode::Enter, .. })
                                     | Event::Key(KeyEvent { code: KeyCode::Right, .. }) => {
-                                        // Accept selection
+                                        // Accept selection (strip description if present)
+                                        let comp = strip_completion_desc(&completions[sel]);
                                         let mut new_buf = buf[..word_start].to_string();
-                                        new_buf.push_str(&completions[sel]);
-                                        if !completions[sel].ends_with('/') { new_buf.push(' '); }
+                                        new_buf.push_str(&comp);
+                                        if !comp.ends_with('/') { new_buf.push(' '); }
                                         if cursor < buf.len() { new_buf.push_str(&buf[cursor..]); }
                                         let parts: Vec<&str> = new_buf.trim().split_whitespace().collect();
                                         if let Some(first) = parts.first() {
@@ -441,7 +470,7 @@ pub fn getline(
                                         buf = new_buf;
                                         cursor = buf.len();
                                         // Clear completion display
-                                        clear_completions(completions.len());
+                                        clear_completions_lines(&completions);
                                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                                         break;
                                     }
@@ -455,7 +484,7 @@ pub fn getline(
                                             buf = new_buf;
                                             cursor = buf.len();
                                         }
-                                        clear_completions(completions.len());
+                                        clear_completions_lines(&completions);
                                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                                         break;
                                     }
@@ -469,7 +498,7 @@ pub fn getline(
                                             buf = new_buf;
                                             cursor = buf.len();
                                         }
-                                        clear_completions(completions.len());
+                                        clear_completions_lines(&completions);
                                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                                         break;
                                     }
@@ -1072,30 +1101,75 @@ fn highlight_segment(segment: &str, config: &Config, exe_cache: &[String]) -> St
 /// Draw completions below the prompt with LS_COLORS, selected item in reverse
 fn draw_completions(completions: &[String], selected: usize, ls_colors: &HashMap<String, String>, prompt: &str) {
     let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
-    // Move to line below prompt and clear
+    // Check if any completion has a description (contains double-space)
+    let has_descriptions = completions.iter().any(|c| c.contains("  "));
+
     print!("\r\n\x1b[K");
-    let mut col = 0;
-    for (i, m) in completions.iter().enumerate() {
-        let color = ls_color_for(m, ls_colors);
-        let display = if i == selected {
-            format!("\x1b[7m{}{}\x1b[0m", color, m)
-        } else {
-            format!("{}{}\x1b[0m", color, m)
-        };
-        let width = m.len() + 2;
-        if col + width > cols && col > 0 {
-            print!("\r\n\x1b[K");
-            col = 0;
+
+    if has_descriptions {
+        // One-per-line mode for switch descriptions
+        for (i, m) in completions.iter().enumerate() {
+            let flag = strip_completion_desc(m);
+            let desc = if let Some(pos) = m.find("  ") {
+                m[pos..].trim().to_string()
+            } else {
+                String::new()
+            };
+            if i == selected {
+                print!("\x1b[7m  {:<20}\x1b[0m \x1b[38;5;245m{}\x1b[0m", flag, desc);
+            } else {
+                print!("  \x1b[38;5;220m{:<20}\x1b[0m \x1b[38;5;245m{}\x1b[0m", flag, desc);
+            }
+            if i < completions.len() - 1 {
+                print!("\r\n\x1b[K");
+            }
         }
-        print!("{}  ", display);
-        col += width;
+        print!("\x1b[{}A\r", completions.len());
+    } else {
+        // Packed horizontal mode for files/commands
+        let mut col = 0;
+        for (i, m) in completions.iter().enumerate() {
+            let color = ls_color_for(m, ls_colors);
+            let display = if i == selected {
+                format!("\x1b[7m{}{}\x1b[0m", color, m)
+            } else {
+                format!("{}{}\x1b[0m", color, m)
+            };
+            let width = m.len() + 2;
+            if col + width > cols && col > 0 {
+                print!("\r\n\x1b[K");
+                col = 0;
+            }
+            print!("{}  ", display);
+            col += width;
+        }
+        let total_items_width: usize = completions.iter().map(|m| m.len() + 2).sum();
+        let display_lines = (total_items_width + cols - 1) / cols.max(1);
+        let display_lines = display_lines.max(1);
+        print!("\x1b[{}A\r", display_lines);
     }
-    // Move cursor back up to prompt line
-    let lines_used = 1 + col / cols.max(1);
-    let total_items_width: usize = completions.iter().map(|m| m.len() + 2).sum();
-    let display_lines = (total_items_width + cols - 1) / cols.max(1);
-    let display_lines = display_lines.max(1);
-    print!("\x1b[{}A\r", display_lines);
+    io::stdout().flush().ok();
+}
+
+fn clear_completions_lines(completions: &[String]) {
+    let has_descriptions = completions.iter().any(|c| c.contains("  "));
+    if has_descriptions {
+        let lines = completions.len();
+        print!("\r\n");
+        for _ in 0..lines {
+            print!("\x1b[K\r\n");
+        }
+        print!("\x1b[{}A", lines + 1);
+    } else {
+        let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
+        let total_width: usize = completions.len() * 15;
+        let lines = (total_width / cols.max(1)).max(1) + 1;
+        print!("\r\n");
+        for _ in 0..lines {
+            print!("\x1b[K\r\n");
+        }
+        print!("\x1b[{}A", lines + 1);
+    }
     io::stdout().flush().ok();
 }
 
@@ -1205,15 +1279,22 @@ fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &C
             }
         }
 
-        // Complete switches from --help
+        // Complete switches from --help (with descriptions if metadata enabled)
         if word.starts_with('-') {
             let switches = get_switches(cmd);
             let mut matches: Vec<String> = switches.iter()
-                .filter(|s| s.starts_with(word))
-                .cloned()
+                .filter(|s| s.0.starts_with(word))
+                .map(|(sw, desc)| {
+                    if config.completion_show_metadata && !desc.is_empty() {
+                        // Pad switch to align descriptions
+                        let desc_short = if desc.len() > 40 { &desc[..40] } else { desc.as_str() };
+                        format!("{:<20} {}", sw, desc_short)
+                    } else {
+                        sw.clone()
+                    }
+                })
                 .collect();
             if !matches.is_empty() {
-                matches.sort();
                 matches.truncate(config.completion_limit);
                 return (matches, ws);
             }
