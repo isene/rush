@@ -181,6 +181,7 @@ fn main() {
                     state.history_times.remove(0);
                 }
             }
+            state.save(); // Persist immediately so other sessions see it
         }
 
         // Pre-command plugin hook
