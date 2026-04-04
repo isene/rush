@@ -1,11 +1,12 @@
 use std::env;
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::config::Config;
 
 static HOSTNAME: OnceLock<String> = OnceLock::new();
 static USERNAME: OnceLock<String> = OnceLock::new();
+static GIT_CACHE: OnceLock<Mutex<(String, String)>> = OnceLock::new();
 
 /// Build the shell prompt string with colors from config
 pub fn build_prompt(config: &Config) -> String {
@@ -70,8 +71,21 @@ fn get_dir_color(cwd: &str, config: &Config) -> u8 {
     config.c_cwd
 }
 
-/// Get current git branch (empty string if not in a repo)
+/// Get current git branch (empty string if not in a repo), cached per directory
 fn git_branch() -> String {
+    let cwd = env::current_dir().unwrap_or_default().to_string_lossy().to_string();
+    let cache = GIT_CACHE.get_or_init(|| Mutex::new((String::new(), String::new())));
+    let mut cached = cache.lock().unwrap();
+    if cached.0 == cwd {
+        return cached.1.clone();
+    }
+    let branch = git_branch_lookup();
+    *cached = (cwd, branch.clone());
+    branch
+}
+
+/// Actual git branch lookup via .git/HEAD
+fn git_branch_lookup() -> String {
     let mut dir = env::current_dir().unwrap_or_default();
     for _ in 0..10 {
         let head = dir.join(".git/HEAD");

@@ -7,61 +7,64 @@ use crate::config::{Config, State};
 use crate::execute::shell_split;
 use crate::prompt;
 
-/// Parse LS_COLORS into a map of extension -> ANSI code
-fn parse_ls_colors() -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    if let Ok(val) = std::env::var("LS_COLORS") {
-        for entry in val.split(':') {
-            if let Some((key, code)) = entry.split_once('=') {
-                map.insert(key.to_string(), code.to_string());
+/// Parse LS_COLORS into a map of extension -> ANSI code (cached statically)
+fn parse_ls_colors() -> &'static HashMap<String, String> {
+    LS_COLORS_CACHE.get_or_init(|| {
+        let mut map = HashMap::new();
+        if let Ok(val) = std::env::var("LS_COLORS") {
+            for entry in val.split(':') {
+                if let Some((key, code)) = entry.split_once('=') {
+                    map.insert(key.to_string(), code.to_string());
+                }
             }
         }
-    }
-    map
+        map
+    })
 }
 
-/// Get LS_COLORS code for a path
+/// Get LS_COLORS code for a path (single stat call)
 fn ls_color_for(path: &str, ls_colors: &HashMap<String, String>) -> String {
+    use std::os::unix::fs::PermissionsExt;
     let p = std::path::Path::new(path.trim_end_matches('/'));
-    if path.ends_with('/') || p.is_dir() {
-        if let Some(code) = ls_colors.get("di") {
-            return format!("\x1b[{}m", code);
-        }
-        return "\x1b[38;5;12m".to_string(); // default blue
-    }
-    if p.is_symlink() {
+    // Symlink check uses lstat (symlink_metadata), other checks use stat (metadata)
+    let is_link = p.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false);
+    if is_link {
         if let Some(code) = ls_colors.get("ln") {
             return format!("\x1b[{}m", code);
         }
     }
-    // Check by extension
+    let meta = std::fs::metadata(p); // follows symlinks
+    let is_dir = path.ends_with('/') || meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+    if is_dir {
+        if let Some(code) = ls_colors.get("di") {
+            return format!("\x1b[{}m", code);
+        }
+        return "\x1b[38;5;12m".to_string();
+    }
     if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
         let key = format!("*.{}", ext);
         if let Some(code) = ls_colors.get(&key) {
             return format!("\x1b[{}m", code);
         }
     }
-    // Executable
-    if is_executable(path) {
+    let is_exec = meta.map(|m| m.permissions().mode() & 0o111 != 0 && m.is_file()).unwrap_or(false);
+    if is_exec {
         if let Some(code) = ls_colors.get("ex") {
             return format!("\x1b[{}m", code);
         }
-        return "\x1b[38;5;10m".to_string(); // default green
+        return "\x1b[38;5;10m".to_string();
     }
-    String::new() // no special color
-}
-
-fn is_executable(path: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.permissions().mode() & 0o111 != 0 && m.is_file())
-        .unwrap_or(false)
+    String::new()
 }
 
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
+static LS_COLORS_CACHE: OnceLock<HashMap<String, String>> = OnceLock::new();
 static SWITCH_CACHE: OnceLock<Mutex<HashMap<String, Vec<(String, String)>>>> = OnceLock::new();
+static GIT_STATUS_CACHE: OnceLock<Mutex<(String, bool, u64)>> = OnceLock::new();
+static SWITCH_RE: OnceLock<regex::Regex> = OnceLock::new();
+static SWITCH_RE2: OnceLock<regex::Regex> = OnceLock::new();
 
 /// Parse switches from `command --help` output, cached.
 /// Returns (switch_name, description) pairs.
@@ -76,17 +79,36 @@ fn get_switches(cmd: &str) -> Vec<(String, String)> {
     let mut seen = std::collections::HashSet::new();
 
     for flag in &["--help", "-h"] {
-        if let Ok(output) = std::process::Command::new(cmd)
+        // Spawn with piped output, kill if it takes too long
+        let mut child = match std::process::Command::new(cmd)
             .arg(flag)
-            .output()
-        {
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn() { Ok(c) => c, Err(_) => continue };
+        // Wait up to 2 seconds
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if start.elapsed().as_secs() >= 2 {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
+        if let Ok(output) = child.wait_with_output() {
             let text = String::from_utf8_lossy(&output.stdout).to_string()
                 + &String::from_utf8_lossy(&output.stderr);
             if !text.is_empty() {
                 for line in text.lines() {
                     let trimmed = line.trim();
                     // Match lines like: -x, --long-opt   description text
-                    let re = regex::Regex::new(r"^\s*(--?[a-zA-Z][\w-]*)(?:,\s*(--?[a-zA-Z][\w-]*))?(?:\s*[=\s]\S*)?\s{2,}(.+)").unwrap();
+                    let re = SWITCH_RE.get_or_init(|| regex::Regex::new(r"^\s*(--?[a-zA-Z][\w-]*)(?:,\s*(--?[a-zA-Z][\w-]*))?(?:\s*[=\s]\S*)?\s{2,}(.+)").unwrap());
                     if let Some(cap) = re.captures(trimmed) {
                         let desc = cap.get(3).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
                         if let Some(short) = cap.get(1) {
@@ -99,7 +121,7 @@ fn get_switches(cmd: &str) -> Vec<(String, String)> {
                         }
                     } else {
                         // Simpler fallback: just extract flags without descriptions
-                        let re2 = regex::Regex::new(r"(?:^|\s)(--?[a-zA-Z][\w-]*)").unwrap();
+                        let re2 = SWITCH_RE2.get_or_init(|| regex::Regex::new(r"(?:^|\s)(--?[a-zA-Z][\w-]*)").unwrap());
                         for cap2 in re2.captures_iter(trimmed) {
                             let sw = cap2[1].to_string();
                             if seen.insert(sw.clone()) {
@@ -440,7 +462,7 @@ pub fn getline(
                             // Enter interactive completion mode
                             let ls_colors = parse_ls_colors();
                             let mut sel: usize = 0;
-                            draw_completions(&completions, sel, &ls_colors, &prompt_str);
+                            draw_completions(&completions, sel, ls_colors, &prompt_str);
                             loop {
                                 let cev = match event::read() {
                                     Ok(ev) => ev,
@@ -449,11 +471,11 @@ pub fn getline(
                                 match cev {
                                     Event::Key(KeyEvent { code: KeyCode::Tab, .. }) => {
                                         sel = (sel + 1) % completions.len();
-                                        draw_completions(&completions, sel, &ls_colors, &prompt_str);
+                                        draw_completions(&completions, sel, ls_colors, &prompt_str);
                                     }
                                     Event::Key(KeyEvent { code: KeyCode::BackTab, .. }) => {
                                         sel = (sel + completions.len() - 1) % completions.len();
-                                        draw_completions(&completions, sel, &ls_colors, &prompt_str);
+                                        draw_completions(&completions, sel, ls_colors, &prompt_str);
                                     }
                                     Event::Key(KeyEvent { code: KeyCode::Enter, .. })
                                     | Event::Key(KeyEvent { code: KeyCode::Right, .. }) => {
@@ -694,7 +716,7 @@ pub fn getline(
                                 let underlined = format!("{}\x1b[4m{}\x1b[0m", before, word);
                                 print!("\r\x1b[K{}{}{}", prompt_str, underlined, after);
                                 io::stdout().flush().ok();
-                                std::thread::sleep(std::time::Duration::from_millis(150));
+                                std::thread::sleep(std::time::Duration::from_millis(50));
                                 // Replace abbreviation with expansion + space
                                 buf = format!("{}{} {}", before, expansion, after);
                                 cursor = before.len() + expansion.len() + 1;
@@ -826,14 +848,23 @@ fn draw_right_prompt(config: &Config, last_cmd_duration: f64) {
 
     let mut parts: Vec<String> = Vec::new();
 
-    // Git dirty/clean indicator
+    // Git dirty/clean indicator (cached for 5 seconds)
     let git_dir = find_git_dir();
     if !git_dir.is_empty() {
-        let is_clean = std::process::Command::new("git")
-            .args(["status", "--porcelain"])
-            .output()
-            .map(|o| o.stdout.is_empty())
-            .unwrap_or(true);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let cache = GIT_STATUS_CACHE.get_or_init(|| Mutex::new((String::new(), true, 0)));
+        let mut cached = cache.lock().unwrap();
+        let is_clean = if cached.0 == git_dir && now - cached.2 < 5 {
+            cached.1
+        } else {
+            let clean = std::process::Command::new("git")
+                .args(["status", "--porcelain"])
+                .output()
+                .map(|o| o.stdout.is_empty())
+                .unwrap_or(true);
+            *cached = (git_dir, clean, now);
+            clean
+        };
         if is_clean {
             parts.push("\x1b[32m●\x1b[0m".to_string()); // green
         } else {
@@ -1076,7 +1107,7 @@ fn highlight_segment(segment: &str, config: &Config, exe_cache: &[String]) -> St
                 };
                 let p = std::path::Path::new(&expanded);
                 if p.exists() || p.is_symlink() {
-                    let color_code = ls_color_for(&expanded, &ls_colors);
+                    let color_code = ls_color_for(&expanded, ls_colors);
                     if !color_code.is_empty() {
                         colored_rest.push_str(&format!("{}{}\x1b[0m", color_code, word));
                     } else {
@@ -1214,14 +1245,15 @@ fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &C
             .filter(|e| e.starts_with(word))
             .map(|s| s.to_string())
             .collect();
+        let mut seen: std::collections::HashSet<String> = matches.iter().cloned().collect();
         // Also check nicks, bookmarks, and colon commands
         for k in config.nick.keys() {
-            if k.starts_with(word) && !matches.contains(k) {
+            if k.starts_with(word) && seen.insert(k.clone()) {
                 matches.push(k.clone());
             }
         }
         for k in config.bookmarks.keys() {
-            if k.starts_with(word) && !matches.contains(k) {
+            if k.starts_with(word) && seen.insert(k.clone()) {
                 matches.push(k.clone());
             }
         }
@@ -1235,7 +1267,7 @@ fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &C
                 ":abbrev", ":version", ":info", ":help",
             ];
             for cmd in &colon_cmds {
-                if cmd.starts_with(word) && !matches.iter().any(|m| m == cmd) {
+                if cmd.starts_with(word) && seen.insert(cmd.to_string()) {
                     matches.push(cmd.to_string());
                 }
             }
@@ -1244,13 +1276,13 @@ fn gather_completions(buf: &str, cursor: usize, exe_cache: &[String], config: &C
         if let Ok(entries) = std::fs::read_dir(".") {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with(word) && !matches.contains(&name.to_string())
+                    let mut completion = name.to_string();
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        completion.push('/');
+                    }
+                    if name.starts_with(word) && seen.insert(completion.clone())
                         && (word.starts_with('.') || !name.starts_with('.'))
                     {
-                        let mut completion = name.to_string();
-                        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                            completion.push('/');
-                        }
                         matches.push(completion);
                     }
                 }

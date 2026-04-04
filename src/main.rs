@@ -114,6 +114,8 @@ fn main() {
     let mut jobs: HashMap<u32, Job> = HashMap::new();
     let mut recording: Option<Recording> = None;
     let mut last_autosave = now_secs();
+    let mut cmds_since_save = 0u32;
+    let mut exe_cache_thread: Option<std::thread::JoinHandle<Vec<String>>> = None;
     let mut last_cmd_duration: f64 = 0.0;
 
     // Load plugins
@@ -144,12 +146,22 @@ fn main() {
         // Cleanup finished background jobs
         execute::cleanup_jobs(&mut jobs);
 
-        // Refresh exe cache if stale (60s TTL)
+        // Collect exe cache from background thread if ready
+        if let Some(handle) = exe_cache_thread.take() {
+            if handle.is_finished() {
+                if let Ok(new_cache) = handle.join() {
+                    exe_cache = new_cache;
+                    state.exe_cache = exe_cache.clone();
+                }
+            } else {
+                exe_cache_thread = Some(handle); // Not done yet, keep it
+            }
+        }
+        // Refresh exe cache if stale (60s TTL) - spawn background thread
         let now = now_secs();
-        if now - state.exe_cache_time > 60 {
-            exe_cache = build_exe_cache();
-            state.exe_cache = exe_cache.clone();
+        if now - state.exe_cache_time > 60 && exe_cache_thread.is_none() {
             state.exe_cache_time = now;
+            exe_cache_thread = Some(std::thread::spawn(build_exe_cache));
         }
 
         let line = match input::getline(&config, &mut state, &exe_cache, last_cmd_duration) {
@@ -176,12 +188,15 @@ fn main() {
             state.history.push(trimmed.to_string());
             state.history_times.push(now_secs());
             if state.history.len() > 200 {
-                state.history.remove(0);
-                if !state.history_times.is_empty() {
-                    state.history_times.remove(0);
-                }
+                let excess = state.history.len() - 200;
+                state.history.drain(..excess);
+                state.history_times.drain(..excess.min(state.history_times.len()));
             }
-            state.save(); // Persist immediately so other sessions see it
+            cmds_since_save += 1;
+            if cmds_since_save >= 5 {
+                state.save();
+                cmds_since_save = 0;
+            }
         }
 
         // Pre-command plugin hook
@@ -212,6 +227,18 @@ fn main() {
 
         // Track command duration for right prompt
         last_cmd_duration = start.elapsed().as_secs_f64();
+
+        // After file manager exits, cd to its last directory
+        let base_cmd = trimmed.split_whitespace().next().unwrap_or("");
+        if base_cmd == config.file_manager || config.nick.get(base_cmd).map(|v| v.starts_with(&config.file_manager)).unwrap_or(false) {
+            let lastdir = dirs::home_dir().unwrap_or_default().join(".pointer/lastdir");
+            if let Ok(dir) = std::fs::read_to_string(&lastdir) {
+                let dir = dir.trim();
+                if !dir.is_empty() {
+                    let _ = std::env::set_current_dir(dir);
+                }
+            }
+        }
 
         // Post-command plugin hook
         let post_ctx = plugin::PluginContext {
