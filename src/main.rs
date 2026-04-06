@@ -228,14 +228,18 @@ fn main() {
         // Track command duration for right prompt
         last_cmd_duration = start.elapsed().as_secs_f64();
 
-        // After file manager exits, cd to its last directory
-        let base_cmd = trimmed.split_whitespace().next().unwrap_or("");
-        if base_cmd == config.file_manager || config.nick.get(base_cmd).map(|v| v.starts_with(&config.file_manager)).unwrap_or(false) {
-            let lastdir = dirs::home_dir().unwrap_or_default().join(".pointer/lastdir");
-            if let Ok(dir) = std::fs::read_to_string(&lastdir) {
-                let dir = dir.trim();
-                if !dir.is_empty() {
-                    let _ = std::env::set_current_dir(dir);
+        // If pointer/rtfm wrote a lastdir file during this command, cd to it
+        let lastdir_path = dirs::home_dir().unwrap_or_default().join(".pointer/lastdir");
+        if let Ok(meta) = std::fs::metadata(&lastdir_path) {
+            if let Ok(mtime) = meta.modified() {
+                let age = mtime.elapsed().unwrap_or_default();
+                if age.as_secs() < 2 {
+                    if let Ok(dir) = std::fs::read_to_string(&lastdir_path) {
+                        let dir = dir.trim();
+                        if !dir.is_empty() && std::path::Path::new(dir).is_dir() {
+                            let _ = std::env::set_current_dir(dir);
+                        }
+                    }
                 }
             }
         }
