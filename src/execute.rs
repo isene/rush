@@ -361,12 +361,13 @@ pub fn execute(
                         println!("{}", old);
                     }
                 }
-            } else if let Err(e) = env::set_current_dir(&dir) {
-                eprintln!("cd: {}: {}", dir, e);
-                return 1;
             } else {
-                let _prev = env::var("OLDPWD").unwrap_or_default();
-                env::set_var("OLDPWD", env::current_dir().unwrap_or_default());
+                let prev = env::current_dir().unwrap_or_default();
+                if let Err(e) = env::set_current_dir(&dir) {
+                    eprintln!("cd: {}: {}", dir, e);
+                    return 1;
+                }
+                env::set_var("OLDPWD", prev);
                 // Track directory history
                 let cwd = env::current_dir().unwrap_or_default().to_string_lossy().to_string();
                 state.dirs.retain(|d| d != &cwd);
