@@ -230,6 +230,12 @@ pub fn getline(
 ) -> Option<String> {
     let prompt_str = prompt::build_prompt(config);
 
+    // Emit OSC 7 (current working directory) so terminal can track cwd
+    if let Ok(cwd) = std::env::current_dir() {
+        let hostname = std::env::var("HOSTNAME").unwrap_or_default();
+        print!("\x1b]7;file://{}{}\x1b\\", hostname, cwd.display());
+    }
+
     // Draw right prompt with git status and duration
     if config.rprompt {
         draw_right_prompt(config, last_cmd_duration);
