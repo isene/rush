@@ -431,6 +431,10 @@ pub fn execute(
             }
             return 0;
         }
+        // Bare `fzf` (also reached via the `f` nick): fuzzy-find then cd into selection
+        "fzf" if parts.len() == 1 => {
+            return handle_fzf();
+        }
         _ => {}
     }
 
