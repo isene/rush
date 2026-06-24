@@ -22,7 +22,7 @@ fn setup_signal_handlers() {
         libc::signal(libc::SIGINT, libc::SIG_IGN);   // Ctrl+C: ignore in shell, children restore SIG_DFL
         libc::signal(libc::SIGTSTP, libc::SIG_IGN);  // Ctrl+Z: ignore in shell
         libc::signal(libc::SIGHUP, libc::SIG_DFL);   // Terminal closed: exit
-        libc::signal(libc::SIGUSR1, sigusr1_handler as libc::sighandler_t); // Config reload from crush
+        libc::signal(libc::SIGUSR1, sigusr1_handler as *const () as libc::sighandler_t); // Config reload from crush
     }
 }
 

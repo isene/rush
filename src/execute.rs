@@ -996,7 +996,7 @@ fn handle_colon_command(
                     let m = (local % 3600) / 60;
                     let s = local % 60;
                     // Also compute date
-                    let days = local / 86400;
+                    let _days = local / 86400;
                     // Approximate date from epoch days (good enough for display)
                     println!("  {:4} [{:02}:{:02}:{:02}] {}", idx, h, m, s, cmd);
                 } else {
@@ -1744,9 +1744,9 @@ pub fn now_secs() -> u64 {
 
 fn chrono_time() -> String {
     let secs = now_secs();
-    let hours = (secs % 86400) / 3600;
-    let mins = (secs % 3600) / 60;
-    let s = secs % 60;
+    let _hours = (secs % 86400) / 3600;
+    let _mins = (secs % 3600) / 60;
+    let _s = secs % 60;
     // Adjust for local timezone offset
     let offset: i64 = {
         let now = std::time::SystemTime::now();

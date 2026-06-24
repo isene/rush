@@ -222,6 +222,7 @@ fn line_needs_continuation(line: &str) -> bool {
 }
 
 /// Read a line of input with editing, history, tab completion, syntax highlighting
+#[allow(unused_assignments)]
 pub fn getline(
     config: &Config,
     state: &mut State,
@@ -849,7 +850,7 @@ fn draw_reverse_search(query: &str, current_match: &str) {
 }
 
 /// Draw right-aligned prompt info (git dirty/clean, duration)
-fn draw_right_prompt(config: &Config, last_cmd_duration: f64) {
+fn draw_right_prompt(_config: &Config, last_cmd_duration: f64) {
     let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
 
     let mut parts: Vec<String> = Vec::new();
@@ -1136,7 +1137,7 @@ fn highlight_segment(segment: &str, config: &Config, exe_cache: &[String]) -> St
 
 /// Tab completion with learning weights
 /// Draw completions below the prompt with LS_COLORS, selected item in reverse
-fn draw_completions(completions: &[String], selected: usize, ls_colors: &HashMap<String, String>, prompt: &str) {
+fn draw_completions(completions: &[String], selected: usize, ls_colors: &HashMap<String, String>, _prompt: &str) {
     let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
     // Check if any completion has a description (contains double-space)
     let has_descriptions = completions.iter().any(|c| c.contains("  "));
@@ -1207,20 +1208,6 @@ fn clear_completions_lines(completions: &[String]) {
         }
         print!("\x1b[{}A", lines + 1);
     }
-    io::stdout().flush().ok();
-}
-
-/// Clear the completion display area
-fn clear_completions(count: usize) {
-    let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
-    let total_width: usize = count * 15; // rough estimate
-    let lines = (total_width / cols.max(1)).max(1) + 1;
-    print!("\r\n");
-    for _ in 0..lines {
-        print!("\x1b[K\r\n");
-    }
-    // Move back up
-    print!("\x1b[{}A", lines + 1);
     io::stdout().flush().ok();
 }
 

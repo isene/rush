@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 /// Plugin manifest (plugin.json)
@@ -16,6 +15,7 @@ pub struct PluginManifest {
     #[serde(default)]
     pub commands: Vec<String>,  // custom :commands the plugin provides
     #[serde(default)]
+    #[allow(dead_code)] // part of plugin manifest API; consumed by get_completions
     pub completions: bool,      // plugin can provide completions
 }
 
@@ -38,6 +38,7 @@ pub struct PluginContext {
 
 /// Response from plugin (JSON on stdout)
 #[derive(Deserialize, Default, Debug)]
+#[allow(dead_code)] // command/completions/prompt are part of the plugin response API
 pub struct PluginResponse {
     #[serde(default)]
     pub action: String,          // allow, block, modify
@@ -179,6 +180,7 @@ impl PluginManager {
     }
 
     /// Get completions from all plugins
+    #[allow(dead_code)] // plugin completion API; not yet wired to the completion path
     pub fn get_completions(&self, word: &str, line: &str) -> Vec<String> {
         let mut all = Vec::new();
         let ctx = PluginContext {
