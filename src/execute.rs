@@ -1,3 +1,4 @@
+use crust::style;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::collections::HashMap;
@@ -307,7 +308,7 @@ pub fn execute(
     // Show timestamp + expanded command if enabled
     if config.show_cmd && !line.starts_with('=') {
         let now = chrono_time();
-        println!("\x1b[38;5;{}m{}: {}\x1b[0m", config.c_stamp, now, line);
+        println!("{}", style::styled(&format!("{now}: {line}"), Some(config.c_stamp), None, ""));
     }
 
     // Check validation rules
@@ -1064,7 +1065,7 @@ fn handle_colon_command(
             let mut entries: Vec<(&String, &usize)> = state.cmd_frequency.iter().collect();
             entries.sort_by(|a, b| b.1.cmp(a.1));
             entries.truncate(20);
-            println!("\x1b[1m  {:>6}  Command\x1b[0m", "Count");
+            println!("{}", style::bold(&format!("  {:>6}  Command", "Count")));
             println!("  {:->6}  {:-<30}", "", "");
             for (cmd, count) in entries {
                 println!("  {:>6}  {}", count, cmd);
@@ -1438,7 +1439,7 @@ fn handle_colon_command(
             0
         }
         "info" => {
-            println!("\x1b[1mrush\x1b[0m - a fast terminal shell written in Rust");
+            println!("{} - a fast terminal shell written in Rust", style::bold("rush"));
             println!();
             println!("Features:");
             println!("  - Nick aliases and global nicks (parametrized)");
@@ -1464,7 +1465,7 @@ fn handle_colon_command(
             0
         }
         "help" => {
-            println!("\x1b[1mrush commands:\x1b[0m");
+            println!("{}", style::bold("rush commands:"));
             println!("  :nick [name = val | -name]       Aliases");
             println!("  :gnick [name = val | -name]      Global aliases");
             println!("  :bm [name [path] [#tags] | -name | ?tag]  Bookmarks");
@@ -1492,16 +1493,16 @@ fn handle_colon_command(
             println!("  :info                             Show feature overview");
             println!("  :help                             This help");
             println!();
-            println!("\x1b[1mHistory expansion:\x1b[0m");
+            println!("{}", style::bold("History expansion:"));
             println!("  !!                                Last command");
             println!("  !N                                Command number N");
             println!("  !-N                               Nth previous command");
             println!();
-            println!("\x1b[1mAI integration:\x1b[0m");
+            println!("{}", style::bold("AI integration:"));
             println!("  @ <prompt>                        Ask AI a question");
             println!("  @@ <prompt>                       Ask AI for a shell command");
             println!();
-            println!("\x1b[1mSpecial:\x1b[0m");
+            println!("{}", style::bold("Special:"));
             println!("  f                                 Fuzzy find with fzf");
             println!("  r                                 Launch file manager");
             println!("  cd N                              Jump to Nth dir from :dirs");
@@ -1509,7 +1510,7 @@ fn handle_colon_command(
             println!("  popd                              Pop dir from stack and cd");
             println!("  :dirs -v                          Show directory stack");
             println!();
-            println!("\x1b[1mKeys:\x1b[0m");
+            println!("{}", style::bold("Keys:"));
             println!("  Tab                               Completion (interactive cycling)");
             println!("  Shift-Tab                         History search");
             println!("  Ctrl-R                            Reverse incremental search");
@@ -1520,7 +1521,7 @@ fn handle_colon_command(
             println!("  Right arrow                       Accept history suggestion");
             println!("  Space                             Expand abbreviations");
             println!();
-            println!("\x1b[1mMigration:\x1b[0m");
+            println!("{}", style::bold("Migration:"));
             println!("  :import_rsh                       Import nicks/bookmarks from ~/.rshrc");
             0
         }

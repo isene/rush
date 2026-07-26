@@ -4,6 +4,7 @@ mod input;
 mod plugin;
 mod prompt;
 
+use crust::style;
 use config::{Config, State};
 use execute::{build_exe_cache, now_secs, Job, Recording};
 use std::collections::HashMap;
@@ -77,7 +78,7 @@ fn main() {
     let mut state = State::load();
 
     if first_run {
-        println!("\x1b[1mWelcome to rush!\x1b[0m");
+        println!("{}", style::bold("Welcome to rush!"));
         println!();
         println!("Quick start:");
         println!("  :help          Show all commands");
@@ -96,7 +97,7 @@ fn main() {
         let rng = now_secs() % 10;
         if rng < 3 {
             let tip_idx = (now_secs() as usize) % TIPS.len();
-            println!("\x1b[38;5;243mTip: {}\x1b[0m", TIPS[tip_idx]);
+            println!("{}", style::styled(&format!("Tip: {}", TIPS[tip_idx]), Some(243), None, ""));
         }
     }
 
@@ -266,8 +267,18 @@ fn main() {
         // Slow command alert
         let elapsed = start.elapsed().as_secs();
         if config.slow_command_threshold > 0 && elapsed >= config.slow_command_threshold {
-            println!("\x1b[38;5;214m[rush] Command took {}s (threshold: {}s)\x1b[0m",
-                elapsed, config.slow_command_threshold);
+            println!(
+                "{}",
+                style::styled(
+                    &format!(
+                        "[rush] Command took {}s (threshold: {}s)",
+                        elapsed, config.slow_command_threshold
+                    ),
+                    Some(214),
+                    None,
+                    ""
+                )
+            );
         }
 
         // Refresh exe cache if :rehash was called

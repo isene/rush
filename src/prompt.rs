@@ -1,3 +1,4 @@
+use crust::style;
 use std::env;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -43,11 +44,11 @@ pub fn build_prompt(config: &Config) -> String {
     let git_str = if git.is_empty() {
         String::new()
     } else {
-        format!(" \x1b[38;5;{}m({})\x1b[0m", config.c_git, git)
+        format!(" {}", style::styled(&format!("({git})"), Some(config.c_git), None, ""))
     };
 
     // Set terminal window title via OSC
-    let title = format!("\x1b]0;rush: {}\x07", cwd);
+    let title = style::title_seq(&format!("rush: {cwd}"));
 
     // Use root colors when running as root
     let is_root = unsafe { libc::getuid() } == 0;
@@ -56,8 +57,13 @@ pub fn build_prompt(config: &Config) -> String {
 
     // Prompt: user@host: cwd/ (git) >
     format!(
-        "{}\x1b[38;5;{}m\x1b[1m{}\x1b[0m\x1b[38;5;{}m@{}\x1b[0m:\x1b[38;5;{}m {}/\x1b[0m{} \x1b[38;5;{}m>\x1b[0m ",
-        title, user_color, user, host_color, host, dir_color, cwd, git_str, config.c_prompt
+        "{}{}{}:{}{} {} ",
+        title,
+        style::styled(user, Some(user_color), None, "b"),
+        style::styled(&format!("@{host}"), Some(host_color), None, ""),
+        style::styled(&format!(" {cwd}/"), Some(dir_color), None, ""),
+        git_str,
+        style::styled(">", Some(config.c_prompt), None, "")
     )
 }
 

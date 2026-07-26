@@ -1,3 +1,4 @@
+use crust::style;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
@@ -230,7 +231,7 @@ impl PluginManager {
         }
         for p in &self.plugins {
             let status = if p.enabled { "enabled" } else { "disabled" };
-            println!("  \x1b[1m{}\x1b[0m {} [{}]", p.manifest.name, p.manifest.version, status);
+            println!("  {} {} [{}]", style::bold(&p.manifest.name), p.manifest.version, status);
             if !p.manifest.description.is_empty() {
                 println!("    {}", p.manifest.description);
             }

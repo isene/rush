@@ -1,3 +1,6 @@
+use crust::{Crust, Cursor};
+use crust::seq;
+use crust::style;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use std::collections::HashMap;
@@ -30,29 +33,29 @@ fn ls_color_for(path: &str, ls_colors: &HashMap<String, String>) -> String {
     let is_link = p.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false);
     if is_link {
         if let Some(code) = ls_colors.get("ln") {
-            return format!("\x1b[{}m", code);
+            return style::sgr(&code);
         }
     }
     let meta = std::fs::metadata(p); // follows symlinks
     let is_dir = path.ends_with('/') || meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
     if is_dir {
         if let Some(code) = ls_colors.get("di") {
-            return format!("\x1b[{}m", code);
+            return style::sgr(&code);
         }
-        return "\x1b[38;5;12m".to_string();
+        return style::set_fg(12);
     }
     if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
         let key = format!("*.{}", ext);
         if let Some(code) = ls_colors.get(&key) {
-            return format!("\x1b[{}m", code);
+            return style::sgr(&code);
         }
     }
     let is_exec = meta.map(|m| m.permissions().mode() & 0o111 != 0 && m.is_file()).unwrap_or(false);
     if is_exec {
         if let Some(code) = ls_colors.get("ex") {
-            return format!("\x1b[{}m", code);
+            return style::sgr(&code);
         }
-        return "\x1b[38;5;10m".to_string();
+        return style::set_fg(10);
     }
     String::new()
 }
@@ -234,7 +237,7 @@ pub fn getline(
     // Emit OSC 7 (current working directory) so terminal can track cwd
     if let Ok(cwd) = std::env::current_dir() {
         let hostname = std::env::var("HOSTNAME").unwrap_or_default();
-        print!("\x1b]7;file://{}{}\x1b\\", hostname, cwd.display());
+        Crust::set_cwd(&hostname, &cwd.display().to_string());
     }
 
     // Draw right prompt with git status and duration
@@ -292,7 +295,7 @@ pub fn getline(
                             // Cancel search
                             history_search_active = false;
                             // Clear search display and redraw
-                            print!("\r\x1b[K");
+                            print!("\r{}", seq::ERASE_EOL);
                             print!("\r{}", prompt_str);
                             redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                         }
@@ -304,7 +307,7 @@ pub fn getline(
                                 cursor = buf.len();
                             }
                             // Clear search display and redraw
-                            print!("\r\x1b[K");
+                            print!("\r{}", seq::ERASE_EOL);
                             print!("\r{}", prompt_str);
                             redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                         }
@@ -347,14 +350,14 @@ pub fn getline(
                     match (code, modifiers) {
                         (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                             reverse_search_active = false;
-                            print!("\r\x1b[K");
+                            print!("\r{}", seq::ERASE_EOL);
                             print!("\r{}", prompt_str);
                             redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                         }
                         (KeyCode::Enter, _) => {
                             reverse_search_active = false;
                             // Accept the match; redraw and let it fall through to return
-                            print!("\r\x1b[K");
+                            print!("\r{}", seq::ERASE_EOL);
                             print!("\r{}", prompt_str);
                             cursor = buf.len();
                             redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
@@ -425,7 +428,7 @@ pub fn getline(
                     }
                     // Ctrl-L: clear screen
                     (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
-                        print!("\x1b[2J\x1b[H{}", prompt_str);
+                        print!("{}{}{}", seq::ERASE_ALL, seq::HOME, prompt_str);
                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                     }
                     // Enter: execute (or continue for multi-line)
@@ -651,7 +654,7 @@ pub fn getline(
                                 shell_quote(&buf), shell_quote(&buf), shell_quote(&buf)))
                             .status();
                         // Brief flash to confirm
-                        print!("\r\x1b[K\x1b[38;5;243mCopied to clipboard\x1b[0m");
+                        print!("\r{}{}", seq::ERASE_EOL, style::styled("Copied to clipboard", Some(243), None, ""));
                         io::stdout().flush().ok();
                         std::thread::sleep(std::time::Duration::from_millis(300));
                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
@@ -689,7 +692,7 @@ pub fn getline(
                         let _ = std::fs::remove_file(&tmpfile);
                         terminal::enable_raw_mode().ok();
                         // Redraw prompt and buffer
-                        print!("\r\x1b[K{}", prompt_str);
+                        print!("\r{}{}", seq::ERASE_EOL, prompt_str);
                         redraw_line(&prompt_str, &buf, cursor, config, exe_cache, &state.history);
                     }
                     // Right arrow: accept suggestion or move cursor
@@ -720,8 +723,8 @@ pub fn getline(
                                 // Briefly underline the abbreviation
                                 let before = buf[..word_start].to_string();
                                 let after = buf[cursor..].to_string();
-                                let underlined = format!("{}\x1b[4m{}\x1b[0m", before, word);
-                                print!("\r\x1b[K{}{}{}", prompt_str, underlined, after);
+                                let underlined = format!("{}{}", before, style::styled(word, None, None, "u"));
+                                print!("\r{}{}{}{}", seq::ERASE_EOL, prompt_str, underlined, after);
                                 io::stdout().flush().ok();
                                 std::thread::sleep(std::time::Duration::from_millis(50));
                                 // Replace abbreviation with expansion + space
@@ -781,7 +784,7 @@ pub fn getline(
 
     terminal::disable_raw_mode().ok();
     // Ensure cursor is at column 0 for command output
-    print!("\x1b[G");
+    print!("{}", seq::LINE_START);
     io::stdout().flush().ok();
     result
 }
@@ -807,22 +810,22 @@ fn draw_history_search(query: &str, matches: &[String], selected: usize, _prompt
     let display_count = matches.len().min(5);
 
     // Move to next line and draw search UI
-    print!("\r\n\x1b[K\x1b[38;5;243m(search): \x1b[0m{}", query);
+    print!("\r\n{}{}{}", seq::ERASE_EOL, style::styled("(search): ", Some(243), None, ""), query);
 
     for (i, m) in matches.iter().take(5).enumerate() {
-        print!("\r\n\x1b[K");
+        print!("\r\n{}", seq::ERASE_EOL);
         if i == selected {
-            print!("\x1b[7m  {}\x1b[0m", m); // Reverse video for selected
+            print!("{}", style::styled(&format!("  {m}"), None, None, "r")); // selected
         } else {
-            print!("  \x1b[38;5;244m{}\x1b[0m", m);
+            print!("  {}", style::styled(m, Some(244), None, ""));
         }
     }
 
     // Move cursor back up to the search line
     let lines_down = display_count + 1;
-    print!("\x1b[{}A", lines_down);
+    print!("{}", seq::up(lines_down as u16));
     // Position cursor at end of search query
-    print!("\r\x1b[{}C", 10 + query.len()); // "(search): " is 10 chars
+    print!("\r{}", seq::right((10 + query.len()) as u16)); // "(search): " is 10 chars
     io::stdout().flush().ok();
 }
 
@@ -845,7 +848,7 @@ fn find_reverse_search(query: &str, history: &[String], skip: usize) -> Option<S
 
 /// Draw the reverse-i-search prompt
 fn draw_reverse_search(query: &str, current_match: &str) {
-    print!("\r\x1b[K(reverse-i-search)`{}': {}", query, current_match);
+    print!("\r{}(reverse-i-search)`{}': {}", seq::ERASE_EOL, query, current_match);
     io::stdout().flush().ok();
 }
 
@@ -873,9 +876,9 @@ fn draw_right_prompt(_config: &Config, last_cmd_duration: f64) {
             clean
         };
         if is_clean {
-            parts.push("\x1b[32m●\x1b[0m".to_string()); // green
+            parts.push(style::styled("●", Some(2), None, "")); // green
         } else {
-            parts.push("\x1b[31m●\x1b[0m".to_string()); // red
+            parts.push(style::styled("●", Some(1), None, "")); // red
         }
     }
 
@@ -884,9 +887,9 @@ fn draw_right_prompt(_config: &Config, last_cmd_duration: f64) {
         if last_cmd_duration >= 60.0 {
             let mins = (last_cmd_duration / 60.0).floor() as u64;
             let secs = (last_cmd_duration % 60.0) as u64;
-            parts.push(format!("\x1b[38;5;243m{}m{}s\x1b[0m", mins, secs));
+            parts.push(style::styled(&format!("{mins}m{secs}s"), Some(243), None, ""));
         } else {
-            parts.push(format!("\x1b[38;5;243m{:.1}s\x1b[0m", last_cmd_duration));
+            parts.push(style::styled(&format!("{last_cmd_duration:.1}s"), Some(243), None, ""));
         }
     }
 
@@ -900,8 +903,13 @@ fn draw_right_prompt(_config: &Config, last_cmd_duration: f64) {
 
     if cols > visible_len_rp + 2 {
         // Save cursor, move to right edge, print, restore cursor
-        print!("\x1b[s\x1b[{};{}H{}\x1b[u",
-            cursor_row(), cols - visible_len_rp, rprompt);
+        print!(
+            "{}{}{}{}",
+            seq::SAVE,
+            Cursor::at((cols - visible_len_rp) as u16, cursor_row() as u16),
+            rprompt,
+            seq::RESTORE
+        );
         io::stdout().flush().ok();
     }
 }
@@ -976,7 +984,7 @@ fn redraw_line(prompt: &str, buf: &str, cursor: usize, config: &Config, exe_cach
     let suggestion_suffix = if cursor == buf.len() {
         if let Some(suggestion) = find_history_suggestion(buf, history) {
             let rest = &suggestion[buf.len()..];
-            format!("\x1b[38;5;{}m{}\x1b[0m", config.c_suggestion, rest)
+            style::styled(rest, Some(config.c_suggestion as u8), None, "")
         } else {
             String::new()
         }
@@ -984,7 +992,7 @@ fn redraw_line(prompt: &str, buf: &str, cursor: usize, config: &Config, exe_cach
         String::new()
     };
 
-    print!("\r\x1b[K{}{}{}", prompt, highlighted, suggestion_suffix);
+    print!("\r{}{}{}{}", seq::ERASE_EOL, prompt, highlighted, suggestion_suffix);
     // Position cursor
     let col = prompt_width + display_width(&buf[..cursor]);
     set_cursor_col(col);
@@ -992,7 +1000,7 @@ fn redraw_line(prompt: &str, buf: &str, cursor: usize, config: &Config, exe_cach
 }
 
 fn set_cursor_col(col: usize) {
-    print!("\r\x1b[{}C", col);
+    print!("\r{}", seq::right(col as u16));
     io::stdout().flush().ok();
 }
 
@@ -1093,7 +1101,7 @@ fn highlight_segment(segment: &str, config: &Config, exe_cache: &[String]) -> St
     };
 
     let cmd_end = trimmed.find(' ').unwrap_or(trimmed.len());
-    let mut result = format!("{}\x1b[38;5;{}m{}\x1b[0m", leading_ws, cmd_color, &trimmed[..cmd_end]);
+    let mut result = format!("{}{}", leading_ws, style::styled(&trimmed[..cmd_end], Some(cmd_color as u8), None, ""));
 
     if cmd_end < trimmed.len() {
         let rest = &trimmed[cmd_end..];
@@ -1104,7 +1112,7 @@ fn highlight_segment(segment: &str, config: &Config, exe_cache: &[String]) -> St
                 continue;
             }
             if word.starts_with('-') {
-                colored_rest.push_str(&format!("\x1b[38;5;{}m{}\x1b[0m", config.c_switch, word));
+                colored_rest.push_str(&style::styled(word, Some(config.c_switch as u8), None, ""));
             } else {
                 let expanded = if word.starts_with('~') {
                     let home = dirs::home_dir().unwrap_or_default().to_string_lossy().to_string();
@@ -1116,9 +1124,9 @@ fn highlight_segment(segment: &str, config: &Config, exe_cache: &[String]) -> St
                 if p.exists() || p.is_symlink() {
                     let color_code = ls_color_for(&expanded, ls_colors);
                     if !color_code.is_empty() {
-                        colored_rest.push_str(&format!("{}{}\x1b[0m", color_code, word));
+                        colored_rest.push_str(&format!("{}{}{}", color_code, word, style::RESET));
                     } else {
-                        colored_rest.push_str(&format!("\x1b[38;5;{}m{}\x1b[0m", config.c_path, word));
+                        colored_rest.push_str(&style::styled(word, Some(config.c_path as u8), None, ""));
                     }
                 } else {
                     colored_rest.push_str(word);
@@ -1142,7 +1150,7 @@ fn draw_completions(completions: &[String], selected: usize, ls_colors: &HashMap
     // Check if any completion has a description (contains double-space)
     let has_descriptions = completions.iter().any(|c| c.contains("  "));
 
-    print!("\r\n\x1b[K");
+    print!("\r\n{}", seq::ERASE_EOL);
 
     if has_descriptions {
         // One-per-line mode for switch descriptions
@@ -1154,28 +1162,28 @@ fn draw_completions(completions: &[String], selected: usize, ls_colors: &HashMap
                 String::new()
             };
             if i == selected {
-                print!("\x1b[7m  {:<20}\x1b[0m \x1b[38;5;245m{}\x1b[0m", flag, desc);
+                print!("{} {}", style::styled(&format!("  {flag:<20}"), None, None, "r"), style::styled(&desc, Some(245), None, ""));
             } else {
-                print!("  \x1b[38;5;220m{:<20}\x1b[0m \x1b[38;5;245m{}\x1b[0m", flag, desc);
+                print!("  {} {}", style::styled(&format!("{flag:<20}"), Some(220), None, ""), style::styled(&desc, Some(245), None, ""));
             }
             if i < completions.len() - 1 {
-                print!("\r\n\x1b[K");
+                print!("\r\n{}", seq::ERASE_EOL);
             }
         }
-        print!("\x1b[{}A\r", completions.len());
+        print!("{}\r", seq::up(completions.len() as u16));
     } else {
         // Packed horizontal mode for files/commands
         let mut col = 0;
         for (i, m) in completions.iter().enumerate() {
             let color = ls_color_for(m, ls_colors);
             let display = if i == selected {
-                format!("\x1b[7m{}{}\x1b[0m", color, m)
+                format!("{}{}", color, style::styled(m, None, None, "r"))
             } else {
-                format!("{}{}\x1b[0m", color, m)
+                format!("{}{}{}", color, m, style::RESET)
             };
             let width = m.len() + 2;
             if col + width > cols && col > 0 {
-                print!("\r\n\x1b[K");
+                print!("\r\n{}", seq::ERASE_EOL);
                 col = 0;
             }
             print!("{}  ", display);
@@ -1184,7 +1192,7 @@ fn draw_completions(completions: &[String], selected: usize, ls_colors: &HashMap
         let total_items_width: usize = completions.iter().map(|m| m.len() + 2).sum();
         let display_lines = (total_items_width + cols - 1) / cols.max(1);
         let display_lines = display_lines.max(1);
-        print!("\x1b[{}A\r", display_lines);
+        print!("{}\r", seq::up(display_lines as u16));
     }
     io::stdout().flush().ok();
 }
@@ -1195,18 +1203,18 @@ fn clear_completions_lines(completions: &[String]) {
         let lines = completions.len();
         print!("\r\n");
         for _ in 0..lines {
-            print!("\x1b[K\r\n");
+            print!("{}\r\n", seq::ERASE_EOL);
         }
-        print!("\x1b[{}A", lines + 1);
+        print!("{}", seq::up((lines + 1) as u16));
     } else {
         let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
         let total_width: usize = completions.len() * 15;
         let lines = (total_width / cols.max(1)).max(1) + 1;
         print!("\r\n");
         for _ in 0..lines {
-            print!("\x1b[K\r\n");
+            print!("{}\r\n", seq::ERASE_EOL);
         }
-        print!("\x1b[{}A", lines + 1);
+        print!("{}", seq::up((lines + 1) as u16));
     }
     io::stdout().flush().ok();
 }
