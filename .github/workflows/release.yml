@@ -30,6 +30,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: rush
+
+      - name: Checkout crust
+        uses: actions/checkout@v4
+        with:
+          repository: isene/crust
+          path: crust
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -44,9 +52,11 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
       - name: Build
+        working-directory: rush
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package
+        working-directory: rush
         run: |
           cp target/${{ matrix.target }}/release/rush ${{ matrix.artifact }}
           chmod +x ${{ matrix.artifact }}

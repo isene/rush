@@ -12,8 +12,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: rush
+
+      - name: Checkout crust
+        uses: actions/checkout@v4
+        with:
+          repository: isene/crust
+          path: crust
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check
+        working-directory: rush
       - run: cargo build --release
+        working-directory: rush
       - name: Binary size
+        working-directory: rush
         run: ls -lh target/release/rush
