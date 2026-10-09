@@ -299,7 +299,6 @@ fn main() {
 fn source_lscolors() {
     // Source LS_COLORS from common locations
     for path in &[
-        "/home/geir/.local/share/lscolors.sh",
         "~/.local/share/lscolors.sh",
         "/etc/dircolors",
     ] {

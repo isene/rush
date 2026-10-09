@@ -718,66 +718,24 @@ fn handle_fzf() -> i32 {
     }
 }
 
-/// Handle AI integration (@ and @@)
+/// Handle AI integration (@ and @@): one question to `claude -p`.
 fn handle_ai_command(prompt: &str, suggest_cmd: bool) -> i32 {
     if prompt.is_empty() {
         eprintln!("Usage: @ <prompt> or @@ <prompt>");
         return 1;
     }
-
-    // Read API key
-    let key_path = "/home/.safe/openai.txt";
-    let api_key = match std::fs::read_to_string(key_path) {
-        Ok(k) => k.trim().to_string(),
-        Err(_) => {
-            eprintln!("rush: cannot read API key from {}", key_path);
-            return 1;
-        }
-    };
-
-    let system_msg = if suggest_cmd {
-        "You are a shell command assistant. Given the user's request, suggest a single shell command. Output ONLY the command, nothing else."
+    let ask = if suggest_cmd {
+        format!("Suggest a single shell command for this task. Output ONLY the command, nothing else.\n\n{}", prompt)
     } else {
-        "You are a helpful assistant. Be concise."
+        format!("Be concise.\n\n{}", prompt)
     };
-
-    let body = serde_json::json!({
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.3
-    });
-
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "https://api.openai.com/v1/chat/completions",
-            "-H", "Content-Type: application/json",
-            "-H", &format!("Authorization: Bearer {}", api_key),
-            "-d", &body.to_string(),
-        ])
-        .output();
-
-    match output {
-        Ok(o) => {
-            let response = String::from_utf8_lossy(&o.stdout);
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&response) {
-                if let Some(content) = val["choices"][0]["message"]["content"].as_str() {
-                    println!("{}", content.trim());
-                    return 0;
-                }
-                if let Some(err) = val["error"]["message"].as_str() {
-                    eprintln!("AI error: {}", err);
-                    return 1;
-                }
-            }
-            eprintln!("rush: unexpected AI response");
-            1
-        }
-        Err(e) => {
-            eprintln!("rush: curl failed: {}", e);
+    // The answer goes straight to the terminal. stdin is closed, so
+    // claude does not wait for more input.
+    match Command::new("claude").arg("-p").arg(&ask).stdin(std::process::Stdio::null()).status() {
+        Ok(s) if s.success() => 0,
+        Ok(_) => 1,
+        Err(_) => {
+            eprintln!("rush: claude is not installed");
             1
         }
     }

@@ -88,7 +88,7 @@ A feature-complete terminal shell compiled to a single binary. Feature clone of 
 - Nick recursion guard
 
 **Integrations:**
-- AI: `@ question` (chat) and `@@ task` (command suggestion) via OpenAI
+- AI: `@ question` (chat) and `@@ task` (command suggestion) via Claude (`claude -p`)
 - Calculator: `:calc 2**10 + sqrt(144)`
 - xrpn: `= expr` pipes to HP-41 RPN calculator
 - fzf: `f` for fuzzy file finding
